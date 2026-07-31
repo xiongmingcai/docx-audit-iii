@@ -1,0 +1,34 @@
+name: docx-audit
+runtime:
+  kind: python
+  package_manager: pip
+  entry: src.worker
+description: >
+  文生文文档审核 Worker。解析 docx、静态规则检查、Agent 语言质量检查、生成报告。
+scripts:
+  install: "pip install -r requirements.txt"
+  start: "python -m src.worker"
+functions:
+  - docx::parse
+  - docx::check_ai_traces
+  - docx::check_heading_comments
+  - docx::check_paragraph_comments
+  - docx::check_table_refs_static
+  - docx::check_table_refs_agent
+  - docx::check_paragraph_quality
+  - docx::generate_report
+  - docx::audit
+  - docx::audit_start
+  - docx::quality_batch
+  - docx::quality_finalize
+  - docx::audit_status
+  - docx::config_get
+  - docx::config_set
+triggers:
+  - type: http
+    method: POST
+    path: /audit
+    function: docx::audit_start
+  - type: queue
+    topic: audit-agent
+    function: docx::quality_batch

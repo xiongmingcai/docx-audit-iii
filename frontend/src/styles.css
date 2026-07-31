@@ -1,0 +1,163 @@
+@import 'tailwindcss';
+
+/* ── Design tokens (Linear / Vercel 风) ─────────────────────────────────── */
+@theme {
+  --color-bg: #fafafa;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f4f5;
+  --color-border: #eaeaea;
+  --color-fg: #171717;
+  --color-muted: #737373;
+  --color-accent: #5e6ad2;
+  --color-accent-fg: #ffffff;
+  --color-danger: #e5484d;
+  --color-warn: #f5a623;
+  --color-ok: #3ecf8e;
+
+  --font-sans:
+    'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+}
+
+@variant dark (&:where(.dark, .dark *));
+
+html {
+  font-family: var(--font-sans);
+  color: var(--color-fg);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+/* 深色：通过 <html class="dark"> 切换 */
+.dark {
+  --color-bg: #0a0a0a;
+  --color-surface: #111111;
+  --color-surface-2: #1a1a1a;
+  --color-border: #222222;
+  --color-fg: #ededed;
+  --color-muted: #a1a1a1;
+  --color-accent: #7c86e0;
+  --color-accent-fg: #0a0a0a;
+  --color-danger: #ff6369;
+  --color-warn: #f5a623;
+  --color-ok: #3ecf8e;
+}
+
+/* 等宽数字 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+/* 细滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 8px;
+  border: 2px solid var(--color-bg);
+}
+
+/* 连接灯闪烁 */
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pulse-dot {
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+/* 骨架屏 shimmer */
+@keyframes shimmer {
+  0% {
+    background-position: -400px 0;
+  }
+  100% {
+    background-position: 400px 0;
+  }
+}
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-2) 0%,
+    var(--color-border) 40%,
+    var(--color-surface-2) 80%
+  );
+  background-size: 800px 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* 表单输入 */
+.input {
+  height: 32px;
+  width: 100%;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  padding: 0 8px;
+  font-size: 14px;
+  color: var(--color-fg);
+  outline: none;
+}
+.input:focus {
+  border-color: var(--color-accent);
+}
+
+/* 失败状态抖动 */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-2px); }
+  80% { transform: translateX(2px); }
+}
+
+/* 活跃节点呼吸发光 */
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(94, 106, 210, 0.5); }
+  50%      { box-shadow: 0 0 0 8px rgba(94, 106, 210, 0); }
+}
+.breathe {
+  animation: breathe 2s ease-in-out infinite;
+}
+
+/* 管线流动虚线 */
+@keyframes flow {
+  0%   { stroke-dashoffset: 16; }
+  100% { stroke-dashoffset: 0; }
+}
+.flow-line {
+  animation: flow 1s linear infinite;
+}

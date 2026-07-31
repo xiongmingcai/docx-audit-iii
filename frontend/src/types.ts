@@ -1,0 +1,145 @@
+// 与 workers/docx-audit/src/models.py 的 AuditIssue / fn_audit 返回结构对齐
+
+export type Severity = 'ERROR' | 'WARNING' | 'INFO';
+
+export interface AuditIssue {
+  severity: Severity;
+  rule_id: string;
+  message: string;
+  context?: string;
+  suggestion?: string;
+  priority?: string; // P0 / P1 / P2 / P3 / P4
+  issue_type?: string;
+  location?: string;
+}
+
+export interface AuditStats {
+  paragraphs?: number;
+  headings?: number;
+  tables?: number;
+}
+
+export interface AuditSummary {
+  total: number;
+  errors: number;
+  warnings: number;
+}
+
+export interface AuditReport {
+  report_path?: string;
+  csv_path?: string;
+  errors: number;
+  warnings: number;
+  total: number;
+}
+
+/** docx::audit 的 payload */
+export interface AuditPayload {
+  path: string;
+  output_path?: string;
+  use_llm?: boolean;
+  check_comments?: boolean;
+}
+
+/** docx::audit 的返回值 */
+export interface AuditResult {
+  ok: boolean;
+  error?: string;
+  path?: string; // 后台流程中可能无文件路径
+  stats?: AuditStats;
+  issues?: AuditIssue[];
+  report?: AuditReport;
+  summary?: AuditSummary;
+  trace_id?: string; // 关联 iii Console trace
+}
+
+export type AuditJobStatus = 'pending' | 'running' | 'success' | 'error';
+
+/** 后台作业当前步骤（与 worker.py state.step 对齐） */
+export type AuditJobStep =
+  | 'accepted'
+  | 'static_done'
+  | 'agent_running'
+  | 'finalizing'
+  | 'completed'
+  | 'failed';
+
+export interface AuditJob {
+  /** worker 返回的 job_id（== state key），贯穿轮询/推送/跳转全链路 */
+  id: string;
+  project: string;
+  fileName: string;
+  path: string;
+  useLlm: boolean;
+  checkComments: boolean;
+  status: AuditJobStatus;
+  createdAt: number; // epoch ms
+  finishedAt?: number;
+  durationMs?: number;
+  result?: AuditResult;
+  error?: string;
+  // ── 后台进度（由 docx::audit_start / ui_progress push / audit_status 轮询 填充）──
+  step?: AuditJobStep;
+  doneBatches?: number;
+  totalBatches?: number;
+  totalParas?: number;
+  issueCount?: number;
+  jobTraceId?: string; // OTel trace_id（不同于 job.id），用于跳转 iii Console
+  // ── 实时活动 ──
+  activity?: ActivityEvent;        // 当前正在发生的事件
+  activityLog?: ActivityEvent[];   // 完整活动时间线（最近 20 条）
+  llmCalls?: LlmCallStatus;        // 当前 LLM 调用状态
+  queueDepth?: number;             // 队列深度
+}
+
+/** docx::audit_start 的 payload */
+export interface AuditStartPayload {
+  path?: string;
+  content?: string;
+  channel_ref?: { access_key: string; channel_id: string; direction: string };
+  filename?: string;
+  use_llm?: boolean;
+  check_comments?: boolean;
+}
+
+/** docx::audit_start 的返回值 */
+export interface AuditStartResult {
+  ok: boolean;
+  error?: string;
+  job_id: string;
+  trace_id?: string;
+  static_issues?: AuditIssue[];
+  stats?: AuditStats;
+  agent_enqueued?: number;
+  agent_total_paras?: number;
+}
+
+/** 后端推送到浏览器的进度 payload（docx::ui_progress） */
+export interface AuditProgressPayload {
+  job_id: string;
+  step: AuditJobStep;
+  done_batches: number;
+  total_batches: number;
+  total_paras?: number;
+  issue_count?: number;
+  report_path?: string;
+  // ── 实时活动详情 ──
+  activity?: ActivityEvent;
+  llm_calls?: LlmCallStatus;
+  queue_depth?: number;
+}
+
+/** 实时活动事件 */
+export interface ActivityEvent {
+  type: 'parse' | 'static_check' | 'agent_call' | 'report' | 'queue_wait' | 'error';
+  message: string;
+  at: number; // epoch ms
+}
+
+/** LLM 调用状态 */
+export interface LlmCallStatus {
+  batch_index: number;
+  total_batches: number;
+  started_at: number; // epoch ms
+  model: string;
+}

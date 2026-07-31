@@ -1,0 +1,13 @@
+# iii engine config for docx-audit
+#
+# 顶层只允许 `workers`（或 `modules`）一个 key。
+# 端口在各 worker 的 config 块内设置；此处使用内置默认值：
+#   - WebSocket 网关: 49134（workers/docx-audit 的 III_ENGINE_URL）
+#   - HTTP:            3111
+workers:
+  - name: iii-http
+  - name: iii-queue
+  - name: iii-state
+  - name: iii-observability
+  - name: docx-audit
+    worker_path: /home/robert/development/docx-audit-iii/workers/docx-audit

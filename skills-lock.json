@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "skills": {
+    "iii-architecture-patterns": {
+      "source": "iii-hq/iii",
+      "sourceType": "github",
+      "skillPath": "skills/iii-architecture-patterns/SKILL.md",
+      "computedHash": "d6f3b8cc2279fa069e3051c20346bd1aa80cecaca513e24126ebf8289c06860b"
+    },
+    "iii-core-primitives": {
+      "source": "iii-hq/iii",
+      "sourceType": "github",
+      "skillPath": "skills/iii-core-primitives/SKILL.md",
+      "computedHash": "a6e3a942a68e4312f64b4276688221e79ac8902e0dec0785f792b31d3c38f035"
+    },
+    "iii-engine-config": {
+      "source": "iii-hq/iii",
+      "sourceType": "github",
+      "skillPath": "skills/iii-engine-config/SKILL.md",
+      "computedHash": "08e8a1360017c6036f1c04cc94172f7e9056d2aade409087f097b5f307ce17d4"
+    },
+    "iii-error-handling": {
+      "source": "iii-hq/iii",
+      "sourceType": "github",
+      "skillPath": "skills/iii-error-handling/SKILL.md",
+      "computedHash": "4c6aa48710062aa02cbe5d789b3d329778018dac74bba242d79b44747b3f7047"
+    },
+    "iii-getting-started": {
+      "source": "iii-hq/iii",
+      "sourceType": "github",
+      "skillPath": "skills/iii-getting-started/SKILL.md",
+      "computedHash": "70743228c89fd612bfe56860338e3278d6314d7ea3d457f5f22aba10a07b4355"
+    },
+    "iii-sdk-reference": {
+      "source": "iii-hq/iii",
+      "sourceType": "github",
+      "skillPath": "skills/iii-sdk-reference/SKILL.md",
+      "computedHash": "c6d19b6fb13af06d40db8438c48520230167623675f4aa1f5485c012a699dfc3"
+    },
+    "presentation": {
+      "source": "iii-hq/iii",
+      "sourceType": "github",
+      "skillPath": "skills/presentation/SKILL.md",
+      "computedHash": "b1d836255073de5ad9110a1c68adab57dffbc9022c6af6e9d8b062bdfd639646"
+    }
+  }
+}
