@@ -8,10 +8,11 @@ dist/
 build/
 *.tsbuildinfo
 
-# Environment
+# Environment & runtime config (may contain secrets)
 .env
 .env.local
 .env.*.local
+workers/docx-audit/config.json
 
 # Python
 __pycache__/
