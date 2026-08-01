@@ -122,14 +122,113 @@ def get_all_safe() -> dict[str, dict]:
 
 
 def get(key: str, default: Any = None) -> Any:
-    """读配置：优先 config.json，其次环境变量，其次 default。"""
+    """读配置：优先 iii-state → config.json → 环境变量 → default。
+
+    iii-state 存储在 scope=project:<project_id>, key=settings，
+    由前端 Settings 页面写入，包含 llm/api_key 等嵌套结构。
+    """
+    # 1. 优先从 iii-state 读取（前端 Settings 页面写入）
+    state_val = _get_from_state(key)
+    if state_val is not None and state_val != "":
+        return state_val
+    # 2. config.json（沙箱内 /workspace/config.json）
     data = _load()
     if key in data and data[key] not in (None, ""):
         return data[key]
+    # 3. 环境变量
     env_val = os.getenv(key)
     if env_val is not None and env_val != "":
         return env_val
     return default
+
+
+def _get_from_state(key: str) -> Any:
+    """从 iii-state 读取配置（scope=project:M1212, key=settings）。"""
+    try:
+        from .models import DEFAULT_PROJECT
+        from iii import register_worker
+        import os
+
+        state = _state_get_cached(DEFAULT_PROJECT)
+        if not state:
+            return None
+
+        # 映射扁平 key 到嵌套结构
+        # LLM_API_KEY → state.llm.apiKey
+        # LLM_BASE_URL → state.llm.baseUrl
+        # LLM_MODEL → state.llm.model
+        # EMBEDDING_* → state.embedding.*
+        # RERANKER_* → state.reranker.*
+        key_upper = key.upper()
+        if key_upper.startswith("LLM_"):
+            field = key_upper.replace("LLM_", "", 1).lower()
+            return state.get("llm", {}).get(field)
+        if key_upper.startswith("EMBEDDING_"):
+            field = key_upper.replace("EMBEDDING_", "", 1).lower()
+            return state.get("embedding", {}).get(field)
+        if key_upper.startswith("RERANKER_"):
+            field = key_upper.replace("RERANKER_", "", 1).lower()
+            return state.get("reranker", {}).get(field)
+        return None
+    except Exception:
+        return None
+
+
+_state_cache: dict = {}
+_state_cache_time: float = 0
+_state_reader = None
+
+
+def _get_state_reader():
+    """获取或创建 state reader worker 连接（单例）。"""
+    global _state_reader
+    if _state_reader is None:
+        try:
+            from iii import register_worker
+            import os
+            url = os.getenv("III_ENGINE_URL", "ws://localhost:49134")
+            _state_reader = register_worker(url, options={"workerName": "docx-audit-state-reader"})
+        except Exception:
+            return None
+    return _state_reader
+
+
+def _state_get_cached(project_id: str) -> dict:
+    """带缓存的 state 读取（缓存 10s）。"""
+    import time
+    import asyncio
+    global _state_cache, _state_cache_time
+    now = time.time()
+    if now - _state_cache_time < 10 and _state_cache:
+        return _state_cache
+    try:
+        reader = _get_state_reader()
+        if reader is None:
+            return _state_cache
+        # 使用已缓存的 loop 或创建新的
+        try:
+            loop = asyncio.get_running_loop()
+            # 如果在已有 loop 中，用 run_coroutine_threadsafe
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, reader.trigger_async({
+                    "function_id": "state::get",
+                    "payload": {"scope": f"project:{project_id}", "key": "settings"},
+                }))
+                result = future.result(timeout=10)
+        except RuntimeError:
+            # 无 running loop，直接 asyncio.run
+            result = asyncio.run(reader.trigger_async({
+                "function_id": "state::get",
+                "payload": {"scope": f"project:{project_id}", "key": "settings"},
+            }))
+        if result and isinstance(result, dict):
+            _state_cache = result
+            _state_cache_time = now
+            return result
+    except Exception:
+        pass
+    return _state_cache
 
 
 def get_effective() -> dict[str, Any]:
