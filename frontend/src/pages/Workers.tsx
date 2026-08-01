@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { connect, useStore } from '@/store';
+import { connect, useStore, fetchMetrics } from '@/store';
 
 interface WorkerInfo {
   name?: string;
@@ -10,14 +10,21 @@ interface WorkerInfo {
   state?: string;
 }
 
+interface MetricSummary {
+  invocations?: { total?: number; error?: number };
+  workers?: { connected?: number; total?: number };
+  uptime_seconds?: number;
+}
+
 /**
- * 只读：列出引擎侧已注册的 workers。
- * 触发 engine::workers::list 获取；若引擎未实现该内置 Function，回退显示本浏览器 worker。
+ * Workers + Observability 面板。
+ * 列出引擎 workers 并展示关键指标。
  */
 export function Workers() {
   const settings = useStore((s) => s.settings);
   const connection = useStore((s) => s.connection);
   const [workers, setWorkers] = useState<WorkerInfo[]>([]);
+  const [metrics, setMetrics] = useState<MetricSummary>({});
   const [loading, setLoading] = useState(false);
 
   async function load() {
@@ -30,8 +37,10 @@ export function Workers() {
       });
       const list = Array.isArray(res) ? res : (res as { workers?: WorkerInfo[] }).workers ?? [];
       setWorkers(list);
+      // 同时拉取指标
+      const m = await fetchMetrics();
+      setMetrics(m || {});
     } catch {
-      // 回退：至少显示本浏览器 worker
       setWorkers([
         {
           name: settings.workerName,
@@ -56,7 +65,7 @@ export function Workers() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">Workers</h1>
-          <p className="text-sm text-muted">引擎已注册的 Worker 与能力</p>
+          <p className="text-sm text-muted">引擎已注册的 Worker · 可观测性</p>
         </div>
         <button
           onClick={() => {
@@ -69,6 +78,32 @@ export function Workers() {
           {loading ? '刷新中…' : '刷新'}
         </button>
       </div>
+
+      {/* Observability 指标 */}
+      {metrics && Object.keys(metrics).length > 0 && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <MetricCard
+            label="总调用"
+            value={metrics.invocations?.total ?? '—'}
+            tone="fg"
+          />
+          <MetricCard
+            label="错误数"
+            value={metrics.invocations?.error ?? '—'}
+            tone={metrics.invocations?.error ? 'danger' : 'ok'}
+          />
+          <MetricCard
+            label="Workers"
+            value={metrics.workers?.connected ?? '—'}
+            tone="accent"
+          />
+          <MetricCard
+            label="运行时长"
+            value={metrics.uptime_seconds ? `${Math.round(metrics.uptime_seconds / 60)}min` : '—'}
+            tone="fg"
+          />
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {workers.length === 0 && !loading ? (
@@ -108,6 +143,25 @@ export function Workers() {
             </div>
           ))
         )}
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, tone }: { label: string; value: string | number; tone: 'fg' | 'danger' | 'ok' | 'accent' }) {
+  return (
+    <div className="rounded-lg border border-border bg-surface p-3">
+      <div className="text-[11px] uppercase tracking-wide text-muted">{label}</div>
+      <div
+        className={[
+          'mt-1 text-xl font-semibold tnum',
+          tone === 'danger' ? 'text-danger' : '',
+          tone === 'ok' ? 'text-ok' : '',
+          tone === 'accent' ? 'text-accent' : '',
+          tone === 'fg' ? 'text-fg' : '',
+        ].join(' ')}
+      >
+        {value}
       </div>
     </div>
   );

@@ -501,22 +501,12 @@ export async function startBackgroundAudit(input: {
   const c = client ?? (await connect());
   patch({ rttMs: null });
 
-  const result = await c.trigger<AuditStartPayload, AuditStartResult>({
-    function_id: 'docx::audit_start',
-    payload: {
-      path: input.path,
-      use_llm: input.useLlm,
-      check_comments: input.checkComments,
-    },
-  });
+  // 前端预生成 job_id，确保推送到达时 job 已存在
+  const preId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-  if (!result || !result.ok) {
-    throw new Error(result?.error ?? '接单失败');
-  }
-
-  // 用 worker 返回的 job_id 建 job（ID 贯穿全链路）
-  const job: AuditJob = {
-    id: result.job_id,
+  // 预建 job（Pipeline Flow 立即可见）
+  const preJob: AuditJob = {
+    id: preId,
     project: input.project,
     fileName: input.fileName,
     path: input.path,
@@ -524,24 +514,45 @@ export async function startBackgroundAudit(input: {
     checkComments: input.checkComments,
     status: 'running',
     createdAt: Date.now(),
+    step: 'accepted',
+    totalBatches: 0,
+    doneBatches: 0,
+    issueCount: 0,
+  };
+  patch({ jobs: [preJob, ...state.jobs], activeJobId: preId });
+  persistJobs();
+
+  const result = await c.trigger<AuditStartPayload, AuditStartResult>({
+    function_id: 'docx::audit_start',
+    payload: {
+      path: input.path,
+      use_llm: input.useLlm,
+      check_comments: input.checkComments,
+      job_id: preId,  // 传给 worker 使用
+    },
+  });
+
+  if (!result || !result.ok) {
+    applyProgress(preId, { status: 'error', error: result?.error ?? '接单失败', finishedAt: Date.now() });
+    throw new Error(result?.error ?? '接单失败');
+  }
+
+  // 用 worker 返回的数据更新 job（保留 preId 作为 state key）
+  applyProgress(preId, {
     step: (result.agent_enqueued ?? 0) > 0 ? 'agent_running' : 'finalizing',
     totalBatches: result.agent_enqueued ?? 0,
-    doneBatches: 0,
     totalParas: result.agent_total_paras ?? 0,
     issueCount: result.static_issues?.length ?? 0,
     jobTraceId: result.trace_id,
-  };
-  patch({ jobs: [job, ...state.jobs], activeJobId: result.job_id });
-  persistJobs();
-  pollJobs.add(result.job_id);
+  });
+  pollJobs.add(preId);
   startPolling();
-  return { jobId: result.job_id, traceId: result.trace_id };
+  return { jobId: preId, traceId: result.trace_id };
 }
 
 /**
  * 启动后台审核（文件上传模式）。
- * Channel 上传与 audit_start 调用并行；完成后用 worker 返回的 job_id 建 job——
- * 保证前端 ID == worker state key，贯穿轮询/推送/跳转全链路。
+ * 前端预建 job → 推送立即可见；Channel/base64 上传与 audit_start 并行。
  */
 export async function startBackgroundAuditFile(
   file: File,
@@ -552,6 +563,25 @@ export async function startBackgroundAuditFile(
   const useLlm = opts.useLlm ?? true;
   const checkComments = opts.checkComments ?? true;
   patch({ rttMs: null });
+
+  // 预生成 job_id 并建 job（Pipeline Flow 立即可见）
+  const preId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const preJob: AuditJob = {
+    id: preId,
+    project,
+    fileName: file.name,
+    path: '',
+    useLlm,
+    checkComments,
+    status: 'running',
+    createdAt: Date.now(),
+    step: 'accepted',
+    totalBatches: 0,
+    doneBatches: 0,
+    issueCount: 0,
+  };
+  patch({ jobs: [preJob, ...state.jobs], activeJobId: preId });
+  persistJobs();
 
   // 1. 尝试创建流式通道；不可用则降级 base64 内联
   let channel: Channel | null = null;
@@ -572,9 +602,9 @@ export async function startBackgroundAuditFile(
         filename: file.name,
         use_llm: useLlm,
         check_comments: checkComments,
+        job_id: preId,
       },
     });
-    // 并行上传文件（auditPromise 不等待上传完成）
     await writeFileToChannel(channel, file, opts.onProgress);
     result = await auditPromise;
   } else {
@@ -592,36 +622,27 @@ export async function startBackgroundAuditFile(
         filename: file.name,
         use_llm: useLlm,
         check_comments: checkComments,
+        job_id: preId,
       },
     });
   }
 
   if (!result || !result.ok) {
+    applyProgress(preId, { status: 'error', error: result?.error ?? '接单失败', finishedAt: Date.now() });
     throw new Error(result?.error ?? '接单失败');
   }
 
-  // 用 worker 返回的 job_id 建 job（ID 贯穿全链路）
-  const job: AuditJob = {
-    id: result.job_id,
-    project,
-    fileName: file.name,
-    path: '',
-    useLlm,
-    checkComments,
-    status: 'running',
-    createdAt: Date.now(),
+  // 用 worker 返回的数据更新预建 job
+  applyProgress(preId, {
     step: (result.agent_enqueued ?? 0) > 0 ? 'agent_running' : 'finalizing',
     totalBatches: result.agent_enqueued ?? 0,
-    doneBatches: 0,
     totalParas: result.agent_total_paras ?? 0,
     issueCount: result.static_issues?.length ?? 0,
     jobTraceId: result.trace_id,
-  };
-  patch({ jobs: [job, ...state.jobs], activeJobId: result.job_id });
-  persistJobs();
-  pollJobs.add(result.job_id);
+  });
+  pollJobs.add(preId);
   startPolling();
-  return { jobId: result.job_id, traceId: result.trace_id };
+  return { jobId: preId, traceId: result.trace_id };
 }
 
 /** 轮询单个 job 的后台状态（docx::audit_status）。 */
@@ -764,6 +785,49 @@ export function setTheme(theme: 'light' | 'dark') {
 export function clearJobs() {
   patch({ jobs: [] });
   persistJobs();
+}
+
+// ── 可观测性 ───────────────────────────────────────────────────────────────
+
+/** 查询与指定 trace_id 关联的 spans（用于 JobDetail Trace 视图）。 */
+export async function fetchTraceSpans(traceId: string): Promise<any[]> {
+  if (!client) return [];
+  try {
+    const r = await client.trigger<{ trace_id: string; limit: number }, any>({
+      function_id: 'engine::traces::list',
+      payload: { trace_id: traceId, limit: 200 },
+    });
+    return r?.spans ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** 查询最近的日志（用于 JobDetail 日志视图）。 */
+export async function fetchJobLogs(traceId: string): Promise<any[]> {
+  if (!client) return [];
+  try {
+    const r = await client.trigger<{ trace_id: string; limit: number }, any>({
+      function_id: 'engine::logs::list',
+      payload: { trace_id: traceId, limit: 100 },
+    });
+    return r?.logs ?? r?.entries ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** 查询引擎指标。 */
+export async function fetchMetrics(): Promise<any> {
+  if (!client) return {};
+  try {
+    return await client.trigger<{}, any>({
+      function_id: 'engine::metrics::list',
+      payload: {},
+    });
+  } catch {
+    return {};
+  }
 }
 
 // ── 订阅 ─────────────────────────────────────────────────────────────────────

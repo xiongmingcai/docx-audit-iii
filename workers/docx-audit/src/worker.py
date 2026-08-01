@@ -11,6 +11,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# ── OTel 可观测性（withSpan 包裹审核步骤）──
+from opentelemetry import trace as otel_trace
+from opentelemetry.trace import SpanKind
+
 from .models import III_ENGINE_URL, LLM_API_KEY, issues_to_dicts
 from .parse import fn_parse
 from .static_checks import (
@@ -298,6 +302,32 @@ def _current_trace_id() -> str | None:
         return None
 
 
+# ── 子步骤（供 withSpan 包裹）────────────────────────────────
+
+async def _do_parse(iii, path, file_bytes):
+    """解析 docx → (elements, stats)，失败返回 (None, None)。"""
+    parse_result = await _call_trigger_or_local(iii, "docx::parse",
+        _build_parse_payload(path, file_bytes))
+    if parse_result.get("error"):
+        return None, None
+    return parse_result["elements"], parse_result.get("stats", {})
+
+
+async def _do_static_checks(iii, elements, check_comments):
+    """执行静态规则检查，返回 issues 列表。"""
+    issues: list[dict] = []
+    r = await _call_trigger_or_local(iii, "docx::check_ai_traces", {"elements": elements})
+    issues.extend(r.get("issues") or [])
+    if check_comments:
+        r = await _call_trigger_or_local(iii, "docx::check_heading_comments", {"elements": elements})
+        issues.extend(r.get("issues") or [])
+        r = await _call_trigger_or_local(iii, "docx::check_paragraph_comments", {"elements": elements})
+        issues.extend(r.get("issues") or [])
+    r = await _call_trigger_or_local(iii, "docx::check_table_refs_static", {"elements": elements})
+    issues.extend(r.get("issues") or [])
+    return issues
+
+
 # ── L1 同步接单：audit_start ────────────────────────────────
 # 只负责 parse + 静态检查 + 拆批入队，秒级返回。
 # Agent 长工作在 Queue 里异步跑，前端通过 audit_status 轮询。
@@ -328,6 +358,9 @@ async def fn_audit_start(payload: dict, iii=None) -> dict:
     check_comments = payload.get("check_comments", True)
     filename = payload.get("filename") or "audit"
 
+    # 优先使用前端传入的 job_id，确保推送到达时前端 job 已存在
+    pre_job_id = payload.get("job_id") or ""
+
     # 解析输入
     file_bytes = None
     display_name = path
@@ -350,46 +383,28 @@ async def fn_audit_start(payload: dict, iii=None) -> dict:
     else:
         return {"error": "missing path, content, or channel_ref", "ok": False}
 
-    # 1. 解析（同步，经引擎 trigger 或直调）
-    parse_result = await _call_trigger_or_local(iii, "docx::parse",
-        _build_parse_payload(path, file_bytes))
-    if parse_result.get("error"):
-        return {**parse_result, "ok": False}
-    elements = parse_result["elements"]
-    stats = parse_result.get("stats", {})
+    # ── Step 1: 解析（OTel span: audit.parse）──
+    elements, stats = await _with_span("audit.parse", {"filename": display_name}, lambda: _do_parse(iii, path, file_bytes))
+    if elements is None:
+        return {"error": "parse failed", "ok": False}
 
-    # 推送：开始解析
+    # 推送：解析完成（前端 UI 用）
     await _push_progress(iii, {
-        "job_id": "", "step": "accepted", "done_batches": 0, "total_batches": 0,
-        "activity": {"type": "parse", "message": "正在解析文档…", "at": int(time.time()*1000)},
+        "job_id": pre_job_id, "step": "accepted", "done_batches": 0, "total_batches": 0,
+        "activity": {"type": "parse", "message": f"文档解析完成: {stats.get('paragraphs', 0)}段落 {stats.get('headings', 0)}标题", "at": int(time.time()*1000)},
     })
 
-    # 2. 静态检查（同步）
-    static_issues: list[dict] = []
-    # 推送：静态检查开始
-    _check_names = ["AI痕迹", "标题批注"]
-    if check_comments:
-        _check_names.extend(["段落缺批注"])
-    _check_names.append("表格引用")
+    # ── Step 2: 静态检查（OTel span: audit.static_checks）──
+    static_issues = await _with_span("audit.static_checks", {"use_comments": check_comments}, lambda: _do_static_checks(iii, elements, check_comments))
+
+    # 推送：静态检查完成
     await _push_progress(iii, {
-        "job_id": "", "step": "accepted", "done_batches": 0, "total_batches": 0,
-        "activity": {"type": "static_check", "message": f"正在执行静态规则检查({len(_check_names)}项)…", "at": int(time.time()*1000)},
+        "job_id": pre_job_id, "step": "accepted", "done_batches": 0, "total_batches": 0,
+        "activity": {"type": "static_check", "message": f"静态检查完成，发现 {len(static_issues)} 个问题", "at": int(time.time()*1000)},
     })
 
-    r = await _call_trigger_or_local(iii, "docx::check_ai_traces", {"elements": elements})
-    static_issues.extend(r.get("issues") or [])
-
-    if check_comments:
-        r = await _call_trigger_or_local(iii, "docx::check_heading_comments", {"elements": elements})
-        static_issues.extend(r.get("issues") or [])
-        r = await _call_trigger_or_local(iii, "docx::check_paragraph_comments", {"elements": elements})
-        static_issues.extend(r.get("issues") or [])
-
-    r = await _call_trigger_or_local(iii, "docx::check_table_refs_static", {"elements": elements})
-    static_issues.extend(r.get("issues") or [])
-
-    # 3. 创建 job 并入队 Agent 批次
-    job_id = f"job-{int(time.time() * 1000)}-{__import__('random').randint(1000, 9999)}"
+    # 3. 创建 job 并入队 Agent 批次（优先使用前端传入的 job_id）
+    job_id = pre_job_id or f"job-{int(time.time() * 1000)}-{__import__('random').randint(1000, 9999)}"
     trace_id = _current_trace_id()
 
     # 收集需要 Agent 检查的段落（≥20 字）
@@ -420,6 +435,12 @@ async def fn_audit_start(payload: dict, iii=None) -> dict:
             "error": None,
             "batch_ok": [],   # 已完成的批次索引（顶层键，支持 append）
         },
+    })
+
+    # 结构化日志：接单完成
+    await _emit_log(iii, "info", f"审核接单完成: {display_name}", {
+        "job_id": job_id, "static_issues": len(static_issues),
+        "agent_paras": len(agent_paras), "filename": display_name,
     })
 
     if agent_paras and iii is not None and _get_llm_key():
@@ -553,12 +574,16 @@ async def fn_quality_batch(payload: dict, iii=None) -> dict:
         "llm_calls": {"batch_index": batch_index, "total_batches": _total_batches, "started_at": int(_time.time()*1000), "model": "DeepSeek-V3.2"},
     })
 
-    # 调用 Agent 检查（1 次 API 处理多段）
+    # ── Agent 质检（OTel span: audit.agent_quality）──
     from .agent_checks import check_paragraph_quality_agent
     try:
-        issues = await check_paragraph_quality_agent(elements)
+        issues = await _with_span("audit.agent_quality",
+            {"batch_index": batch_index, "total_batches": _total_batches, "para_count": len(elements)},
+            lambda: check_paragraph_quality_agent(elements))
     except Exception as e:
-        print(f"    [quality_batch] Agent 检查失败: {e}")
+        await _emit_log(local_iii, "error", f"Agent 质检失败: batch_{batch_index}", {
+            "job_id": job_id, "batch_index": batch_index, "error": str(e)[:200],
+        })
         # 抛出异常让 Queue 重试；同时把错误写入 state 便于排查
         if local_iii is not None:
             try:
@@ -673,16 +698,18 @@ async def fn_quality_finalize(payload: dict, iii=None) -> dict:
         "activity": {"type": "report", "message": "正在生成审核报告…", "at": int(_time.time()*1000)},
     })
 
-    # 生成报告
-    report_result = await iii.trigger_async({
-        "function_id": "docx::generate_report",
-        "payload": {
-            "elements": [],  # 报告不需要 elements，只需 issues
-            "issues": all_issues,
-            "output_path": f"/workspace/reports/{job_id}_audit_report.docx",
-            "source_name": filename,
-        },
-    })
+    # ── 生成报告（OTel span: audit.generate_report）──
+    report_result = await _with_span("audit.generate_report",
+        {"issue_count": len(all_issues), "job_id": job_id},
+        lambda: iii.trigger_async({
+            "function_id": "docx::generate_report",
+            "payload": {
+                "elements": [],  # 报告不需要 elements，只需 issues
+                "issues": all_issues,
+                "output_path": f"/workspace/reports/{job_id}_audit_report.docx",
+                "source_name": filename,
+            },
+        }))
 
     total_issues = len(all_issues)
     report_path = report_result.get("report_path", "")
@@ -699,6 +726,14 @@ async def fn_quality_finalize(payload: dict, iii=None) -> dict:
                 {"type": "set", "path": "issue_count", "value": total_issues},
             ],
         },
+    })
+
+    # 结构化日志：审核完成
+    await _emit_log(iii, "info", f"审核完成: {filename}", {
+        "job_id": job_id, "total_issues": total_issues,
+        "static_issues": len(job.get("static_issues") or []),
+        "agent_batches": job.get("total_batches", 0),
+        "report_path": report_path,
     })
 
     # 推送完成进度到浏览器
@@ -735,6 +770,39 @@ async def fn_audit_status(payload: dict, iii=None) -> dict:
 def _get_llm_key() -> str:
     from .config_store import get as cfg_get
     return str(cfg_get("LLM_API_KEY", "") or "")
+
+
+# ── OTel 可观测性辅助 ────────────────────────────────────────────────────
+
+_tracer = otel_trace.get_tracer("docx-audit")
+
+
+async def _with_span(name: str, attrs: dict | None = None, fn=None):
+    """包裹异步函数为一个 OTel span（同步属性标记 + 错误捕获）。"""
+    with _tracer.start_as_current_span(name, kind=SpanKind.INTERNAL) as span:
+        if attrs:
+            for k, v in attrs.items():
+                span.set_attribute(k, str(v)[:200])
+        try:
+            return await fn()
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e)[:200])
+            raise
+
+
+async def _emit_log(iii, level: str, message: str, data: dict | None = None):
+    """发送结构化日志到 iii observability（fire-and-forget）。"""
+    if iii is None:
+        return
+    try:
+        await iii.trigger_async({
+            "function_id": f"engine::log::{level}",
+            "payload": {"message": message, "data": data or {}},
+            "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Void(),
+        })
+    except Exception:
+        pass
 
 
 async def _push_progress(iii, payload: dict):

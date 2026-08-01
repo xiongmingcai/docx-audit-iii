@@ -1,6 +1,6 @@
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useStore } from '@/store';
+import { useStore, fetchTraceSpans } from '@/store';
 import { IssueTable } from '@/components/IssueTable';
 import { JobIdChip } from '@/components/JobIdChip';
 import { StatusIcon } from '@/components/StatusIcon';
@@ -62,6 +62,14 @@ export function JobDetail() {
   const project = job?.project ?? 'DOC';
 
   const issues = useMemo(() => job?.result?.issues ?? [], [job]);
+
+  // Trace 视图数据
+  const [traceSpans, setTraceSpans] = useState<any[]>([]);
+  useEffect(() => {
+    if (job?.jobTraceId) {
+      fetchTraceSpans(job.jobTraceId).then(setTraceSpans);
+    }
+  }, [job?.jobTraceId]);
 
   if (!job) {
     return (
@@ -224,6 +232,11 @@ export function JobDetail() {
         <IssueChart issues={job.result.issues ?? []} project={project} fileName={fileName} />
       )}
 
+      {/* Trace 视图 — 展示真实 OTel spans */}
+      {traceSpans.length > 0 && (
+        <TraceView spans={traceSpans} traceId={job.jobTraceId ?? job.result?.trace_id} />
+      )}
+
       <IssueTable
         issues={issues}
         project={project}
@@ -244,5 +257,62 @@ function ActivityDot({ type, isLast, isRunning }: { type: string; isLast: boolea
   if (type === 'report') return <span className={`${cls} rounded-full bg-ok`} />;
   if (type === 'error') return <span className={`${cls} rounded-full bg-danger`} />;
   return <span className={`${cls} rounded-full bg-accent ${isLast && isRunning ? 'animate-pulse' : ''}`} />;
+}
+
+/** Trace 视图 — 展示 OTel spans 列表 */
+function TraceView({ spans, traceId }: { spans: any[]; traceId?: string }) {
+  if (!spans.length) return null;
+  return (
+    <div className="rounded-lg border border-border bg-surface">
+      <div className="flex items-center justify-between border-b border-border px-3 py-2">
+        <h3 className="text-xs font-medium">
+          Trace Spans <span className="text-muted">({spans.length})</span>
+        </h3>
+        {traceId && (
+          <a
+            href={`http://127.0.0.1:3113/traces?trace_id=${traceId}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[11px] text-accent hover:underline"
+          >
+            在 Console 中打开 →
+          </a>
+        )}
+      </div>
+      <div className="max-h-48 overflow-auto">
+        <table className="w-full text-[11px]">
+          <thead className="sticky top-0 bg-surface text-muted">
+            <tr className="text-left">
+              <th className="px-3 py-1.5 font-medium">操作</th>
+              <th className="px-2 py-1.5 font-medium">状态</th>
+              <th className="px-2 py-1.5 font-medium">耗时</th>
+            </tr>
+          </thead>
+          <tbody>
+            {spans.map((s: any, i: number) => {
+              const dur = s.end_time_unix_nano && s.start_time_unix_nano
+                ? `${((s.end_time_unix_nano - s.start_time_unix_nano) / 1e6).toFixed(0)}ms`
+                : s.status === 'unset' ? '进行中…' : '—';
+              const isError = s.status === 'error';
+              return (
+                <tr key={i} className="border-t border-border/50 hover:bg-surface-2">
+                  <td className="px-3 py-1 font-mono text-fg/80">{s.name || '?'}</td>
+                  <td className="px-2 py-1">
+                    <span className={[
+                      'inline-flex h-4 items-center rounded px-1 text-[10px] font-medium',
+                      isError ? 'bg-danger/15 text-danger' : 'bg-ok/15 text-ok',
+                    ].join(' ')}>
+                      {isError ? 'ERR' : 'OK'}
+                    </span>
+                  </td>
+                  <td className="px-2 py-1 tnum text-muted">{dur}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 

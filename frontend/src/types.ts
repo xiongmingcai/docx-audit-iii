@@ -100,6 +100,7 @@ export interface AuditStartPayload {
   filename?: string;
   use_llm?: boolean;
   check_comments?: boolean;
+  job_id?: string; // 前端预生成的 job_id，worker 使用此值而非自行生成
 }
 
 /** docx::audit_start 的返回值 */
