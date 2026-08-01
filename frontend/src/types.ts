@@ -57,12 +57,12 @@ export type AuditJobStatus = 'pending' | 'running' | 'success' | 'error';
 
 /** 后台作业当前步骤（与 worker.py state.step 对齐） */
 export type AuditJobStep =
-  | 'accepted'
-  | 'static_done'
-  | 'agent_running'
-  | 'finalizing'
-  | 'completed'
-  | 'failed';
+  | 'accepted'       // 接单中（解析+静态检查）
+  | 'static_done'    // 静态检查完成（等待 Agent 或出报告）
+  | 'agent_running'  // Agent 质检中
+  | 'finalizing'     // 生成报告中
+  | 'completed'      // 完成
+  | 'failed';        // 失败
 
 export interface AuditJob {
   /** worker 返回的 job_id（== state key），贯穿轮询/推送/跳转全链路 */

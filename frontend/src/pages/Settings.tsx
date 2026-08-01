@@ -1,130 +1,86 @@
-import { useEffect, useState } from 'react';
-import { toast } from 'sonner';
-import { useStore, reconnect } from '@/store';
-import { connect } from '@/store';
-import type { EngineClient } from '@/sdk/client';
-import {
-  fetchConfig,
-  saveConfig,
-  loadCached,
-  type WorkerConfig,
-  type SafeConfigResponse,
-} from '@/lib/config';
+/**
+ * Settings 页面 — 配置持久化到 iii-state
+ *
+ * scope: `project:<projectId>`  key: `settings`
+ * 通过 state::get / state::set 读写，跨会话/跨浏览器同步。
+ */
 
+import { useEffect, useState, useCallback } from 'react';
+import { toast } from 'sonner';
+import { useStore, connect, reconnect } from '@/store';
+import {
+  getProjectSettings,
+  setProjectSettings,
+  testLLMConnection,
+  testEmbeddingConnection,
+  testRerankerConnection,
+  DEFAULT_SETTINGS,
+  type ProjectSettings,
+} from '@/sdk/settings';
+
+// 表单内部状态（驼峰命名 → 提交时转为 ProjectSettings）
 type Tab = 'env' | 'project' | 'connection' | 'about';
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'env', label: '环境变量' },
+  { id: 'env', label: '模型配置' },
   { id: 'project', label: '项目' },
   { id: 'connection', label: '引擎连接' },
   { id: 'about', label: '关于' },
 ];
-
-const DEFAULTS: WorkerConfig = {
-  llm: { base_url: 'https://api.siliconflow.cn/v1', api_key: '', model: 'deepseek-ai/DeepSeek-V3.2' },
-  embedding: { enabled: false, inherit_llm: true, base_url: '', api_key: '', model: 'BAAI/bge-m3', dims: '', batch_size: '16' },
-  reranker: { enabled: false, inherit_llm: true, base_url: '', api_key: '', model: 'Qwen/Qwen3-Reranker-8B', top_n: '10', max_length: '512' },
-};
-
-// 已配置 key 的 hint（从引擎回读）
-const hintOf = (group: Record<string, unknown> | undefined, key: string): string => {
-  const v = group?.[key];
-  if (v && typeof v === 'object' && 'hint' in (v as Record<string, unknown>)) {
-    return (v as Record<string, unknown>).hint as string;
-  }
-  return '';
-};
-const setOf = (group: Record<string, unknown> | undefined, key: string): boolean => {
-  const v = group?.[key];
-  if (v && typeof v === 'object' && 'set' in (v as Record<string, unknown>)) {
-    return (v as Record<string, unknown>).set as boolean;
-  }
-  return false;
-};
-const valOf = (group: Record<string, unknown> | undefined, key: string): unknown => {
-  const v = group?.[key];
-  if (v && typeof v === 'object' && 'set' in (v as Record<string, unknown>)) return undefined;
-  return v;
-};
 
 export function Settings() {
   const connection = useStore((s) => s.connection);
   const settings = useStore((s) => s.settings);
   const [tab, setTab] = useState<Tab>('env');
 
-  const [form, setForm] = useState<WorkerConfig>(() => ({ ...DEFAULTS, ...loadCached() }));
-  const [server, setServer] = useState<SafeConfigResponse | null>(null);
+  // 表单状态（ProjectSettings 格式）
+  const [form, setForm] = useState<ProjectSettings>(DEFAULT_SETTINGS);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  const [dirty, setDirty] = useState(false);
   const [showKey, setShowKey] = useState<Record<string, boolean>>({});
-  const [testState, setTestState] = useState<Record<string, { status: 'idle' | 'ok' | 'err'; ms?: number; msg?: string }>>({});
+  const [testStates, setTestStates] = useState<Record<string, { status: 'idle' | 'ok' | 'err'; ms?: number; msg?: string }>>({});
 
-  // 从引擎拉取最新配置
+  // ── 从 iii-state 加载配置 ──────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const client = await connect();
-        const res = await fetchConfig(client);
+        const stored = await getProjectSettings(client, settings.defaultProject);
         if (cancelled) return;
-        setServer(res);
-        // 用服务器非 secret 字段回填表单
-        setForm((prev) => ({
-          llm: {
-            ...prev.llm,
-            base_url: (valOf(res.llm, 'LLM_BASE_URL') as string) || prev.llm.base_url,
-            model: (valOf(res.llm, 'LLM_MODEL') as string) || prev.llm.model,
-          },
-          embedding: {
-            ...prev.embedding,
-            enabled: (valOf(res.embedding, 'EMBEDDING_ENABLED') as boolean) ?? prev.embedding.enabled,
-            inherit_llm: (valOf(res.embedding, 'EMBEDDING_INHERIT_LLM') as boolean) ?? true,
-            base_url: (valOf(res.embedding, 'EMBEDDING_BASE_URL') as string) || '',
-            model: (valOf(res.embedding, 'EMBEDDING_MODEL') as string) || prev.embedding.model,
-            dims: (valOf(res.embedding, 'EMBEDDING_DIMS') as string) || '',
-            batch_size: (valOf(res.embedding, 'EMBEDDING_BATCH_SIZE') as string) || '16',
-          },
-          reranker: {
-            ...prev.reranker,
-            enabled: (valOf(res.reranker, 'RERANKER_ENABLED') as boolean) ?? prev.reranker.enabled,
-            inherit_llm: (valOf(res.reranker, 'RERANKER_INHERIT_LLM') as boolean) ?? true,
-            base_url: (valOf(res.reranker, 'RERANKER_BASE_URL') as string) || '',
-            model: (valOf(res.reranker, 'RERANKER_MODEL') as string) || prev.reranker.model,
-            top_n: (valOf(res.reranker, 'RERANKER_TOP_N') as string) || '10',
-            max_length: (valOf(res.reranker, 'RERANKER_MAX_LENGTH') as string) || '512',
-          },
-        }));
+        if (stored) {
+          setForm(stored);
+        } else {
+          // 首次使用：写入默认值
+          await setProjectSettings(client, settings.defaultProject, DEFAULT_SETTINGS);
+        }
       } catch {
-        // 离线时保持本地缓存
+        // 离线时使用默认值
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
+  }, [settings.defaultProject]);
+
+  // ── 表单更新 ─────────────────────────────────────────────────────────────
+  const update = useCallback(<K extends keyof ProjectSettings>(
+    group: K,
+    field: keyof ProjectSettings[K],
+    value: ProjectSettings[K][keyof ProjectSettings[K]],
+  ) => {
+    setForm((prev) => ({ ...prev, [group]: { ...prev[group], [field]: value } }));
+    setDirty(true);
   }, []);
 
-  const markDirty = (group: string, field: string) => {
-    setDirty((d) => ({ ...d, [`${group}.${field}`]: true }));
-  };
-
-  const update = <K extends keyof WorkerConfig>(group: K, field: string, value: unknown) => {
-    setForm((prev) => ({ ...prev, [group]: { ...(prev[group] as object), [field]: value } } as WorkerConfig));
-    markDirty(group as string, field);
-  };
-
-  const dirtyCount = Object.keys(dirty).length;
-
+  // ── 保存到 iii-state ─────────────────────────────────────────────────────
   const onSave = async () => {
     setSaving(true);
     try {
       const client = await connect();
-      const dGroups: { llm: string[]; embedding: string[]; reranker: string[] } = { llm: [], embedding: [], reranker: [] };
-      for (const k of Object.keys(dirty)) {
-        const [grp, ...rest] = k.split('.');
-        dGroups[grp as keyof typeof dGroups]?.push(rest.join('.'));
-      }
-      await saveConfig(client, form, dGroups);
-      setDirty({});
-      toast.success('已保存');
+      await setProjectSettings(client, settings.defaultProject, form);
+      setDirty(false);
+      toast.success('已保存到 iii-state');
     } catch (e) {
       toast.error('保存失败: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
@@ -132,33 +88,73 @@ export function Settings() {
     }
   };
 
-  const testLLM = async () => {
-    setTestState((s) => ({ ...s, llm: { status: 'idle' } }));
-    const t0 = Date.now();
+  // ── 测试连接（通用）───────────────────────────────────────────────────────
+  const testConnection = async (
+    key: string,
+    fn: (client: Awaited<ReturnType<typeof connect>>) => Promise<{ ok: boolean; ms: number; msg: string }>,
+  ) => {
+    setTestStates((s) => ({ ...s, [key]: { status: 'idle' } }));
     try {
-      const client: EngineClient = await connect();
-      const res = await client.trigger<Record<string, unknown>, { written: string[] }>({
-        function_id: 'docx::config_set',
-        payload: {
-          LLM_MODEL: form.llm.model,
-          LLM_BASE_URL: form.llm.base_url,
-          ...(form.llm.api_key ? { LLM_API_KEY: form.llm.api_key } : {}),
-        },
-      });
-      setTestState((s) => ({ ...s, llm: { status: 'ok', ms: Date.now() - t0, msg: `已写入 ${res.written?.length ?? 0} 项` } }));
+      const client = await connect();
+      const result = await fn(client);
+      setTestStates((s) => ({ ...s, [key]: { status: result.ok ? 'ok' : 'err', ms: result.ms, msg: result.msg } }));
     } catch (e) {
-      setTestState((s) => ({ ...s, llm: { status: 'err', ms: Date.now() - t0, msg: e instanceof Error ? e.message : String(e) } }));
+      setTestStates((s) => ({ ...s, [key]: { status: 'err', msg: e instanceof Error ? e.message : String(e) } }));
     }
   };
 
-  const llmKeySet = setOf(server?.llm, 'LLM_API_KEY');
-  const llmKeyHint = hintOf(server?.llm, 'LLM_API_KEY');
+  const testLLM = () => testConnection('llm', (c) =>
+    testLLMConnection(c, { baseUrl: form.llm.baseUrl, apiKey: form.llm.apiKey, model: form.llm.model }),
+  );
+  const testEmbedding = () => testConnection('embedding', (c) =>
+    testEmbeddingConnection(c, {
+      baseUrl: form.embedding.inheritLlm ? form.llm.baseUrl : form.embedding.baseUrl,
+      apiKey: form.embedding.inheritLlm ? form.llm.apiKey : form.embedding.apiKey,
+      model: form.embedding.model,
+      dims: form.embedding.dims,
+    }),
+  );
+  const testReranker = () => testConnection('reranker', (c) =>
+    testRerankerConnection(c, {
+      baseUrl: form.reranker.inheritLlm ? form.llm.baseUrl : form.reranker.baseUrl,
+      apiKey: form.reranker.inheritLlm ? form.llm.apiKey : form.reranker.apiKey,
+      model: form.reranker.model,
+      topN: form.reranker.topN,
+      maxLength: form.reranker.maxLength,
+    }),
+  );
+
+  // ── 重置 ─────────────────────────────────────────────────────────────────
+  const onReset = async () => {
+    setForm(DEFAULT_SETTINGS);
+    setDirty(false);
+    try {
+      const client = await connect();
+      await setProjectSettings(client, settings.defaultProject, DEFAULT_SETTINGS);
+      toast.success('已重置为默认值');
+    } catch {
+      toast.error('重置失败');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="grid h-full place-items-center">
+        <div className="flex items-center gap-2 text-sm text-muted">
+          <span className="inline-block h-3 w-3 animate-pulse rounded-full bg-accent" />
+          从 iii-state 加载配置…
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-5 p-6">
       <div>
         <h1 className="text-lg font-semibold tracking-tight">设置</h1>
-        <p className="text-sm text-muted">运行时配置；密钥仅可写入，不会完整回显。</p>
+        <p className="text-sm text-muted">
+          配置持久化到 iii-state（scope=project:{settings.defaultProject}），跨会话同步。
+        </p>
       </div>
 
       {/* Tabs */}
@@ -184,21 +180,21 @@ export function Settings() {
           <Card title="文本生成 LLM" subtitle="Agent 语言质量检查依赖此模型">
             <Field label="BASE_URL">
               <input
-                value={form.llm.base_url}
-                onChange={(e) => update('llm', 'base_url', e.target.value)}
+                value={form.llm.baseUrl}
+                onChange={(e) => update('llm', 'baseUrl', e.target.value)}
                 className="input"
                 placeholder="https://api.siliconflow.cn/v1"
               />
             </Field>
 
-            <Field label="API_KEY" hint={llmKeySet ? `已配置 · hint ${llmKeyHint}` : '未配置 · Agent 检查将被跳过'}>
+            <Field label="API_KEY" hint={form.llm.apiKey ? '已配置（留空表示不修改）' : '未配置 · Agent 检查将被跳过'}>
               <div className="relative">
                 <input
                   type={showKey.llm ? 'text' : 'password'}
-                  value={form.llm.api_key}
-                  onChange={(e) => update('llm', 'api_key', e.target.value)}
+                  value={form.llm.apiKey}
+                  onChange={(e) => update('llm', 'apiKey', e.target.value)}
                   className="input pr-16"
-                  placeholder={llmKeySet ? '已配置则留空表示不修改' : 'sk-...'}
+                  placeholder="sk-..."
                   autoComplete="off"
                 />
                 <button
@@ -224,7 +220,7 @@ export function Settings() {
               <button onClick={testLLM} className="h-7 rounded-md border border-border px-3 text-xs text-muted hover:bg-surface-2 hover:text-fg">
                 测试连接
               </button>
-              <TestBadge state={testState.llm} />
+              <TestBadge state={testStates.llm} />
             </div>
           </Card>
 
@@ -232,35 +228,18 @@ export function Settings() {
           <Card title="嵌入模型 Embedding" subtitle="段落语义重复、近义套话检测（可选）">
             <Toggle label="启用" checked={form.embedding.enabled} onChange={(v) => update('embedding', 'enabled', v)} />
             <Toggle
-              label="继承文本生成的 BASE_URL / API_KEY"
-              checked={form.embedding.inherit_llm}
-              onChange={(v) => update('embedding', 'inherit_llm', v)}
+              label="继承 LLM 的 BASE_URL / API_KEY"
+              checked={form.embedding.inheritLlm}
+              onChange={(v) => update('embedding', 'inheritLlm', v)}
             />
-            {!form.embedding.inherit_llm && (
-              <>
-                <Field label="BASE_URL">
-                  <input value={form.embedding.base_url} onChange={(e) => update('embedding', 'base_url', e.target.value)} className="input" />
-                </Field>
-                <Field label="API_KEY">
-                  <div className="relative">
-                    <input
-                      type={showKey.emb ? 'text' : 'password'}
-                      value={form.embedding.api_key}
-                      onChange={(e) => update('embedding', 'api_key', e.target.value)}
-                      className="input pr-16"
-                      autoComplete="off"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey((s) => ({ ...s, emb: !s.emb }))}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 h-6 rounded px-2 text-xs text-muted hover:text-fg"
-                    >
-                      {showKey.emb ? '隐藏' : '显示'}
-                    </button>
-                  </div>
-                </Field>
-              </>
-            )}
+            <fieldset disabled={form.embedding.inheritLlm} className={form.embedding.inheritLlm ? 'opacity-50 pointer-events-none' : ''}>
+              <Field label="BASE_URL">
+                <input value={form.embedding.baseUrl} onChange={(e) => update('embedding', 'baseUrl', e.target.value)} className="input" />
+              </Field>
+              <Field label="API_KEY">
+                <input type="password" value={form.embedding.apiKey} onChange={(e) => update('embedding', 'apiKey', e.target.value)} className="input" autoComplete="off" />
+              </Field>
+            </fieldset>
             <Field label="MODEL">
               <input value={form.embedding.model} onChange={(e) => update('embedding', 'model', e.target.value)} className="input" placeholder="BAAI/bge-m3" />
             </Field>
@@ -269,94 +248,104 @@ export function Settings() {
                 <input value={form.embedding.dims} onChange={(e) => update('embedding', 'dims', e.target.value)} className="input" placeholder="auto" />
               </Field>
               <Field label="batch size">
-                <input value={form.embedding.batch_size} onChange={(e) => update('embedding', 'batch_size', e.target.value)} className="input" placeholder="16" />
+                <input
+                  value={form.embedding.batchSize}
+                  onChange={(e) => update('embedding', 'batchSize', parseInt(e.target.value, 10) || 16)}
+                  className="input"
+                  placeholder="16"
+                  type="number"
+                />
               </Field>
+            </div>
+            <div className="mt-2 flex items-center gap-3">
+              <button onClick={testEmbedding} disabled={form.embedding.inheritLlm}
+                className={[
+                  'h-7 rounded-md border border-border px-3 text-xs transition',
+                  form.embedding.inheritLlm ? 'opacity-40 cursor-not-allowed text-muted' : 'text-muted hover:bg-surface-2 hover:text-fg',
+                ].join(' ')}
+                title={form.embedding.inheritLlm ? '继承 LLM 配置时无需单独测试' : '测试 Embedding 连接'}
+              >
+                测试连接
+              </button>
+              <TestBadge state={testStates.embedding} />
             </div>
           </Card>
 
           {/* Reranker 卡片 */}
           <Card title="重排模型 Reranker" subtitle="证据句 / 相关段排序（可选）">
             <Toggle label="启用" checked={form.reranker.enabled} onChange={(v) => update('reranker', 'enabled', v)} />
-            <Toggle label="继承文本生成的 BASE_URL / API_KEY" checked={form.reranker.inherit_llm} onChange={(v) => update('reranker', 'inherit_llm', v)} />
-            {!form.reranker.inherit_llm && (
-              <>
-                <Field label="BASE_URL">
-                  <input value={form.reranker.base_url} onChange={(e) => update('reranker', 'base_url', e.target.value)} className="input" />
-                </Field>
-                <Field label="API_KEY">
-                  <div className="relative">
-                    <input
-                      type={showKey.rer ? 'text' : 'password'}
-                      value={form.reranker.api_key}
-                      onChange={(e) => update('reranker', 'api_key', e.target.value)}
-                      className="input pr-16"
-                      autoComplete="off"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey((s) => ({ ...s, rer: !s.rer }))}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 h-6 rounded px-2 text-xs text-muted hover:text-fg"
-                    >
-                      {showKey.rer ? '隐藏' : '显示'}
-                    </button>
-                  </div>
-                </Field>
-              </>
-            )}
+            <Toggle
+              label="继承 LLM 的 BASE_URL / API_KEY"
+              checked={form.reranker.inheritLlm}
+              onChange={(v) => update('reranker', 'inheritLlm', v)}
+            />
+            <fieldset disabled={form.reranker.inheritLlm} className={form.reranker.inheritLlm ? 'opacity-50 pointer-events-none' : ''}>
+              <Field label="BASE_URL">
+                <input value={form.reranker.baseUrl} onChange={(e) => update('reranker', 'baseUrl', e.target.value)} className="input" />
+              </Field>
+              <Field label="API_KEY">
+                <input type="password" value={form.reranker.apiKey} onChange={(e) => update('reranker', 'apiKey', e.target.value)} className="input" autoComplete="off" />
+              </Field>
+            </fieldset>
             <Field label="MODEL">
               <input value={form.reranker.model} onChange={(e) => update('reranker', 'model', e.target.value)} className="input" placeholder="Qwen/Qwen3-Reranker-8B" />
             </Field>
             <div className="flex gap-3">
               <Field label="top_n">
-                <input value={form.reranker.top_n} onChange={(e) => update('reranker', 'top_n', e.target.value)} className="input" placeholder="10" />
+                <input
+                  value={form.reranker.topN}
+                  onChange={(e) => update('reranker', 'topN', parseInt(e.target.value, 10) || 10)}
+                  className="input"
+                  placeholder="10"
+                  type="number"
+                />
               </Field>
               <Field label="max_length">
-                <input value={form.reranker.max_length} onChange={(e) => update('reranker', 'max_length', e.target.value)} className="input" placeholder="512" />
+                <input
+                  value={form.reranker.maxLength}
+                  onChange={(e) => update('reranker', 'maxLength', parseInt(e.target.value, 10) || 512)}
+                  className="input"
+                  placeholder="512"
+                  type="number"
+                />
               </Field>
+            </div>
+            <div className="mt-2 flex items-center gap-3">
+              <button onClick={testReranker} disabled={form.reranker.inheritLlm}
+                className={[
+                  'h-7 rounded-md border border-border px-3 text-xs transition',
+                  form.reranker.inheritLlm ? 'opacity-40 cursor-not-allowed text-muted' : 'text-muted hover:bg-surface-2 hover:text-fg',
+                ].join(' ')}
+                title={form.reranker.inheritLlm ? '继承 LLM 配置时无需单独测试' : '测试 Reranker 连接'}
+              >
+                测试连接
+              </button>
+              <TestBadge state={testStates.reranker} />
             </div>
           </Card>
 
           {/* 底栏操作 */}
           <div className="flex items-center justify-between rounded-lg border border-border bg-surface px-4 py-3">
             <div className="text-xs text-muted">
-              变更将写入 config.json（沙箱内 /workspace/config.json），无需重启即刻生效。
+              变更写入 iii-state（scope=project:{settings.defaultProject} · key=settings），即刻生效。
             </div>
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  setForm({ ...DEFAULTS, ...loadCached() });
-                  setDirty({});
-                }}
-                disabled={dirtyCount === 0}
-                className="h-7 rounded-md border border-border px-3 text-xs text-muted hover:bg-surface-2 hover:text-fg disabled:opacity-50"
-              >
-                重置未保存
+              <button onClick={onReset} className="h-7 rounded-md border border-border px-3 text-xs text-muted hover:bg-surface-2 hover:text-fg">
+                重置默认
               </button>
               <button
                 onClick={onSave}
-                disabled={dirtyCount === 0 || saving}
+                disabled={!dirty || saving}
                 className={[
                   'h-7 rounded-md px-4 text-sm font-medium transition',
-                  dirtyCount > 0 ? 'bg-accent text-accent-fg hover:opacity-90' : 'bg-accent/40 text-accent-fg cursor-not-allowed',
+                  dirty ? 'bg-accent text-accent-fg hover:opacity-90' : 'bg-accent/40 text-accent-fg cursor-not-allowed',
                   saving ? 'opacity-60' : '',
                 ].join(' ')}
               >
-                {saving ? '保存中…' : `保存更改${dirtyCount > 0 ? ` (${dirtyCount})` : ''}`}
+                {saving ? '保存中…' : `保存${dirty ? ' ●' : ''}`}
               </button>
             </div>
           </div>
-
-          {/* 未配置 LLM 时的警告空态 */}
-          {!llmKeySet && !form.llm.api_key && (
-            <div className="flex items-center justify-between rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
-              <div className="flex items-center gap-2 text-warn">
-                <span>⚠</span>
-                <span>
-                  未检测到 LLM_API_KEY。静态规则仍可用，「Agent 检查」将被跳过。
-                </span>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -365,10 +354,10 @@ export function Settings() {
           <Field label="默认项目">
             <input value={settings.defaultProject} className="input" disabled />
           </Field>
-          <Field label="数据根目录（仅显示拼接）">
+          <Field label="数据根目录">
             <input value={settings.dataRoot} className="input" disabled />
           </Field>
-          <p className="text-xs text-muted">项目配置请通过环境变量或项目目录管理。</p>
+          <p className="text-xs text-muted">项目隔离通过 scope=project:{'<projectId>'} 实现。</p>
         </Card>
       )}
 
@@ -383,10 +372,7 @@ export function Settings() {
               <div className="text-xs text-muted">{connection}</div>
             </div>
             <button
-              onClick={() => {
-                void reconnect();
-                toast.info('正在重连…');
-              }}
+              onClick={() => { void reconnect(); toast.info('正在重连…'); }}
               className="h-7 rounded-md border border-border px-2.5 text-xs text-muted transition hover:bg-surface-2 hover:text-fg"
             >
               重连
@@ -398,9 +384,9 @@ export function Settings() {
       {tab === 'about' && (
         <Card title="关于" subtitle="文生文文档审核控制台">
           <div className="space-y-1 text-sm text-muted">
-            <div>版本：0.1.0（iii Worker 托管）</div>
-            <div>审核 Function：docx::parse · docx::check_* · docx::generate_report · docx::audit</div>
-            <div>iii 引擎：{settings.engineUrl}</div>
+            <div>版本：iii-2026-08-01（Pipeline Flow + Trace 视图 + Settings 持久化）</div>
+            <div>审核 Function：docx::parse · docx::check_* · docx::generate_report · docx::audit_start · docx::quality_batch · docx::quality_finalize · docx::audit_status</div>
+            <div>iii 引擎：{settings.engineUrl} · Console：http://127.0.0.1:3113</div>
           </div>
         </Card>
       )}
@@ -410,15 +396,7 @@ export function Settings() {
 
 // ── 子组件 ──────────────────────────────────────────────────────────────────
 
-function Card({
-  title,
-  subtitle,
-  children,
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-}) {
+function Card({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
     <section className="rounded-lg border border-border bg-surface p-4">
       <h2 className="text-sm font-medium">{title}</h2>
@@ -428,15 +406,7 @@ function Card({
   );
 }
 
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block">
       <div className="mb-1 text-sm">{label}</div>
@@ -446,15 +416,7 @@ function Field({
   );
 }
 
-function Toggle({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
+function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <label className="flex cursor-pointer items-center gap-2 text-sm">
       <button
@@ -462,17 +424,9 @@ function Toggle({
         role="switch"
         aria-checked={checked}
         onClick={() => onChange(!checked)}
-        className={[
-          'relative h-5 w-9 rounded-full transition',
-          checked ? 'bg-accent' : 'bg-border',
-        ].join(' ')}
+        className={['relative h-5 w-9 rounded-full transition', checked ? 'bg-accent' : 'bg-border'].join(' ')}
       >
-        <span
-          className={[
-            'absolute top-0.5 h-4 w-4 rounded-full bg-surface transition-all',
-            checked ? 'left-4' : 'left-0.5',
-          ].join(' ')}
-        />
+        <span className={['absolute top-0.5 h-4 w-4 rounded-full bg-surface transition-all', checked ? 'left-4' : 'left-0.5'].join(' ')} />
       </button>
       <span>{label}</span>
     </label>
