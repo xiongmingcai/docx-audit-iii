@@ -462,7 +462,7 @@ async def fn_audit_start(payload: dict, iii=None) -> dict:
                     "elements": batch,
                     "filename": display_name,
                 },
-                "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="audit-agent"),
+                "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="default"),
             })
             agent_enqueued += 1
         # 推送：入队完成，等待消费
@@ -478,7 +478,7 @@ async def fn_audit_start(payload: dict, iii=None) -> dict:
             await iii.trigger_async({
                 "function_id": "docx::quality_finalize",
                 "payload": {"job_id": job_id, "filename": display_name},
-                "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="audit-agent"),
+                "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="default"),
             })
             await _push_progress(iii, {
                 "job_id": job_id, "step": "agent_running",
@@ -646,7 +646,7 @@ async def fn_quality_batch(payload: dict, iii=None) -> dict:
                     await local_iii.trigger_async({
                         "function_id": "docx::quality_finalize",
                         "payload": {"job_id": job_id, "filename": payload.get("filename", "audit")},
-                        "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="audit-agent"),
+                        "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="default"),
                     })
         except Exception as e:
             print(f"    [quality_batch] state update error: {e}")
@@ -772,23 +772,45 @@ def _get_llm_key() -> str:
     return str(cfg_get("LLM_API_KEY", "") or "")
 
 
-# ── OTel 可观测性辅助 ────────────────────────────────────────────────────
+# ── OTel 可观测性辅助（对齐 @iii-dev/helpers/observability 标准）──────────
 
 _tracer = otel_trace.get_tracer("docx-audit")
 
 
 async def _with_span(name: str, attrs: dict | None = None, fn=None):
-    """包裹异步函数为一个 OTel span（同步属性标记 + 错误捕获）。"""
+    """包裹异步函数为一个 OTel span。
+
+    对齐官方 withSpan(name, { kind, traceparent }, fn) 标准：
+    - SpanKind.INTERNAL
+    - 设置 attributes（截断 200 字符）
+    - 成功时 set_status(OK)
+    - 失败时 set_status(ERROR) + set_attribute("error.message") + record_exception
+    - 支持 record_event 里程碑事件
+    """
+    from opentelemetry.trace import StatusCode
     with _tracer.start_as_current_span(name, kind=SpanKind.INTERNAL) as span:
         if attrs:
             for k, v in attrs.items():
                 span.set_attribute(k, str(v)[:200])
         try:
-            return await fn()
+            result = await fn()
+            span.set_status(StatusCode.OK)
+            return result
         except Exception as e:
+            span.set_status(StatusCode.ERROR, str(e)[:200])
             span.set_attribute("error", True)
             span.set_attribute("error.message", str(e)[:200])
+            span.record_exception(e)
             raise
+
+
+def _record_event(name: str, attrs: dict | None = None):
+    """在当前 span 上记录一个里程碑事件（fire-and-forget）。"""
+    span = otel_trace.get_current_span()
+    if span and span.is_recording():
+        for k, v in (attrs or {}).items():
+            span.set_attribute(f"event.{k}", str(v)[:200])
+        span.add_event(name, attributes={k: str(v)[:100] for k, v in (attrs or {}).items()})
 
 
 async def _emit_log(iii, level: str, message: str, data: dict | None = None):
@@ -888,16 +910,16 @@ def main():
         print(f"[docx-audit] trigger register skipped (HTTP /audit): {e}")
         print("  → 请确认 iii.worker.yaml 或引擎配置中已声明该 Trigger")
 
-    # Queue Trigger：quality_batch 仅由 audit-agent 队列消费
+    # Queue Trigger：quality_batch 由 default 队列消费
     try:
         iii.register_trigger(
             {
                 "type": "queue",
-                "topic": "audit-agent",
+                "topic": "default",
                 "function_id": "docx::quality_batch",
             }
         )
-        print("[docx-audit] trigger registered: queue:audit-agent → docx::quality_batch")
+        print("[docx-audit] trigger registered: queue:default → docx::quality_batch")
     except Exception as e:
         print(f"[docx-audit] trigger register FAILED (queue:audit-agent): {e}")
         print("  → 后台异步审核将不可用！请通过以下方式之一补注册：")
