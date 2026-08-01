@@ -37,6 +37,12 @@
       "skillPath": "skills/iii-sdk-reference/SKILL.md",
       "computedHash": "c6d19b6fb13af06d40db8438c48520230167623675f4aa1f5485c012a699dfc3"
     },
+    "mastra": {
+      "source": "mastra-ai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/mastra/SKILL.md",
+      "computedHash": "6482dad39fb72d1fe9d02078c15c3ee708774fd026a8557b4c7dc37fb554977a"
+    },
     "presentation": {
       "source": "iii-hq/iii",
       "sourceType": "github",

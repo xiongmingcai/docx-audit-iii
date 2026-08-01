@@ -1,0 +1,74 @@
+name: obs-demo
+runtime:
+  kind: node
+  package_manager: npm
+  entry: src/worker.ts
+description: >
+  Observability 能力验证 Worker。演示 iii 的 Logger 结构化日志、withSpan 分布式追踪、
+  Baggage 上下文传播、Metrics 指标采集、Span 属性与事件、Span 错误处理等核心可观测性能力。
+scripts:
+  install: "npm install"
+  start: "node --experimental-strip-types src/worker.ts"
+functions:
+  - obs::demo_all
+  - obs::demo_logger
+  - obs::demo_span
+  - obs::demo_baggage
+  - obs::demo_metrics
+  - obs::demo_error
+  - obs::demo_trace_query
+  - obs::demo_waterfall
+  - obs::demo_flame_graph
+  - obs::demo_service_map
+  - obs::demo_logs_correlation
+  - obs::demo_full_dashboard
+  - obs::health
+triggers:
+  - type: http
+    method: GET
+    path: /obs/demo
+    function: obs::demo_all
+  - type: http
+    method: GET
+    path: /obs/logger
+    function: obs::demo_logger
+  - type: http
+    method: GET
+    path: /obs/span
+    function: obs::demo_span
+  - type: http
+    method: GET
+    path: /obs/baggage
+    function: obs::demo_baggage
+  - type: http
+    method: GET
+    path: /obs/metrics
+    function: obs::demo_metrics
+  - type: http
+    method: GET
+    path: /obs/error
+    function: obs::demo_error
+  - type: http
+    method: GET
+    path: /obs/trace
+    function: obs::demo_trace_query
+  - type: http
+    method: GET
+    path: /obs/waterfall
+    function: obs::demo_waterfall
+  - type: http
+    method: GET
+    path: /obs/flame
+    function: obs::demo_flame_graph
+  - type: http
+    method: GET
+    path: /obs/service-map
+    function: obs::demo_service_map
+  - type: http
+    method: GET
+    path: /obs/logs
+    function: obs::demo_logs_correlation
+  - type: http
+    method: GET
+    path: /obs/dashboard
+    function: obs::demo_full_dashboard

@@ -9,5 +9,7 @@ workers:
   - name: iii-queue
   - name: iii-state
   - name: iii-observability
+  - name: obs-demo
+    worker_path: /home/robert/development/docx-audit-iii/workers/obs-demo
   - name: docx-audit
     worker_path: /home/robert/development/docx-audit-iii/workers/docx-audit
