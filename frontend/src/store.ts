@@ -789,17 +789,16 @@ export function clearJobs() {
 
 // ── 可观测性 ───────────────────────────────────────────────────────────────
 
-/** 查询与指定 trace_id 关联的 spans（用于 JobDetail Trace 视图）。 */
-export async function fetchTraceSpans(traceId: string): Promise<any[]> {
-  if (!client) return [];
+/** 查询 trace 的完整树形结构（含子 spans）。 */
+export async function fetchTraceTree(traceId: string): Promise<any> {
+  if (!client) return null;
   try {
-    const r = await client.trigger<{ trace_id: string; limit: number }, any>({
-      function_id: 'engine::traces::list',
-      payload: { trace_id: traceId, limit: 200 },
+    return await client.trigger<{ trace_id: string }, any>({
+      function_id: 'engine::traces::tree',
+      payload: { trace_id: traceId },
     });
-    return r?.spans ?? [];
   } catch {
-    return [];
+    return null;
   }
 }
 

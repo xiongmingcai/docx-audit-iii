@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useStore, fetchTraceSpans } from '@/store';
+import { useStore, fetchTraceTree } from '@/store';
 import { IssueTable } from '@/components/IssueTable';
 import { JobIdChip } from '@/components/JobIdChip';
 import { StatusIcon } from '@/components/StatusIcon';
@@ -24,8 +24,10 @@ const PIPELINE_STEP_ORDER = ['accepted', 'agent_running', 'finalizing', 'complet
 function getStepStatus(targetStep: string, currentStep?: string): 'done' | 'active' | 'pending' {
   if (!currentStep) return 'pending';
   const tgtIdx = PIPELINE_STEP_ORDER.indexOf(targetStep);
-  // agent_running 对应 accepted 之后的阶段
-  const normalizedCur = currentStep === 'accepted' || currentStep === 'static_check' || currentStep === 'queue_wait' ? 'accepted' : currentStep;
+  // 归一化：accepted/static_done 都属于"接单完成"阶段
+  const normalizedCur = ['accepted', 'static_done', 'static_check', 'queue_wait'].includes(currentStep)
+    ? 'accepted'
+    : currentStep;
   const nCurIdx = PIPELINE_STEP_ORDER.indexOf(normalizedCur);
   if (tgtIdx < nCurIdx) return 'done';
   if (tgtIdx === nCurIdx) return 'active';
@@ -62,14 +64,27 @@ export function JobDetail() {
   const project = job?.project ?? 'DOC';
 
   const issues = useMemo(() => job?.result?.issues ?? [], [job]);
+  const summary = job?.result?.summary;
+  const isRunning = job?.status === 'running';
 
-  // Trace 视图数据
-  const [traceSpans, setTraceSpans] = useState<any[]>([]);
+  // Trace 视图数据（实时轮询——使用 tree API 获取完整层级）
+  const [traceTree, setTraceTree] = useState<any>(null);
+  const [traceLoading, setTraceLoading] = useState(false);
   useEffect(() => {
-    if (job?.jobTraceId) {
-      fetchTraceSpans(job.jobTraceId).then(setTraceSpans);
-    }
-  }, [job?.jobTraceId]);
+    if (!job?.jobTraceId) return;
+    let cancelled = false;
+    const poll = async () => {
+      setTraceLoading(true);
+      try {
+        const tree = await fetchTraceTree(job.jobTraceId!);
+        if (!cancelled) setTraceTree(tree);
+      } catch { /* ignore */ }
+      finally { if (!cancelled) setTraceLoading(false); }
+    };
+    poll();
+    const timer = isRunning ? setInterval(poll, 3000) : null;
+    return () => { cancelled = true; if (timer) clearInterval(timer); };
+  }, [job?.jobTraceId, isRunning]);
 
   if (!job) {
     return (
@@ -86,9 +101,6 @@ export function JobDetail() {
       </div>
     );
   }
-
-  const summary = job.result?.summary;
-  const isRunning = job.status === 'running';
 
   return (
     <div className="mx-auto max-w-6xl space-y-5 p-6">
@@ -107,31 +119,18 @@ export function JobDetail() {
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <JobIdChip jobId={job.id} />
             {job.jobTraceId && (
-              <span className="inline-flex items-center gap-1 font-mono text-[11px] text-muted">
-                <span className="text-fg/60">Trace</span>
-                <span>{job.jobTraceId.slice(0, 8)}…{job.jobTraceId.slice(-4)}</span>
-                <button
-                  onClick={() => navigator.clipboard?.writeText(job.jobTraceId!)}
-                  className="grid h-4 w-4 place-items-center rounded text-muted transition hover:bg-surface-2 hover:text-fg"
-                  title="复制 Trace ID"
-                >
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="9" y="9" width="13" height="13" rx="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                  </svg>
-                </button>
-                <a
-                  href={`http://127.0.0.1:3113/traces?trace_id=${job.jobTraceId}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="grid h-4 w-4 place-items-center rounded text-accent hover:bg-surface-2"
-                  title="在 iii Console 中打开 Trace"
-                >
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3" />
-                  </svg>
-                </a>
-              </span>
+              <a
+                href={`http://127.0.0.1:3113/traces?trace_id=${job.jobTraceId}`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[11px] text-accent transition hover:bg-surface-2 hover:border-accent/40"
+                title={`在 iii Console 中查看 Trace (${job.jobTraceId})`}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3" />
+                </svg>
+                <span>Trace {job.jobTraceId.slice(0, 8)}…</span>
+              </a>
             )}
           </div>
           <p className="mt-1 text-xs text-muted">
@@ -232,9 +231,13 @@ export function JobDetail() {
         <IssueChart issues={job.result.issues ?? []} project={project} fileName={fileName} />
       )}
 
-      {/* Trace 视图 — 展示真实 OTel spans */}
-      {traceSpans.length > 0 && (
-        <TraceView spans={traceSpans} traceId={job.jobTraceId ?? job.result?.trace_id} />
+      {/* 实时 Trace 追踪视图（树形结构） */}
+      {(job.jobTraceId || job.result?.trace_id) && (
+        <TraceView
+          tree={traceTree}
+          traceId={job.jobTraceId ?? job.result?.trace_id}
+          loading={traceLoading}
+        />
       )}
 
       <IssueTable
@@ -259,58 +262,112 @@ function ActivityDot({ type, isLast, isRunning }: { type: string; isLast: boolea
   return <span className={`${cls} rounded-full bg-accent ${isLast && isRunning ? 'animate-pulse' : ''}`} />;
 }
 
-/** Trace 视图 — 展示 OTel spans 列表 */
-function TraceView({ spans, traceId }: { spans: any[]; traceId?: string }) {
-  if (!spans.length) return null;
+/**
+ * 实时 Trace 追踪视图 — 展示 OTel span 调用链（树形结构）
+ *
+ * 验收标准视觉：
+ *   OTel Trace (3 spans)                          0599ea72…  [↗ Console]
+ *   ├─▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░  audit.parse        49ms   OK  ▶
+ *   │    └─ filename: 技术说明书.docx
+ *   ├─▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░  audit.static_checks  85ms   OK  ▶
+ *   │    └─ use_comments: true
+ *   ├─▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░  audit.agent_quality  ⟳     ⋯   ▶
+ *   │    └─ batch_index: 3, total_batches: 5
+ *   └─                              audit.generate_report  —     ○
+ */
+function TraceView({ tree, traceId, loading }: { tree: any; traceId?: string; loading?: boolean }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const toggle = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+
+  // 展平树形结构收集所有 span（用于计算时间范围）
+  const allSpans: any[] = [];
+  const collectSpans = (node: any) => {
+    if (node) { allSpans.push(node); for (const child of (node.children ?? [])) collectSpans(child); }
+  };
+  for (const root of (tree?.roots ?? [])) collectSpans(root);
+
+  const spanCount = allSpans.length;
+  const now = Date.now() * 1e6;
+  const minStart = spanCount ? Math.min(...allSpans.map((s) => s.start_time_unix_nano || now)) : now;
+  const maxEnd = spanCount ? Math.max(...allSpans.map((s) => s.end_time_unix_nano || now)) : now;
+  const totalWindow = Math.max(maxEnd - minStart, 1);
+
+  const parseAttrs = (attrs: any): Record<string, string> => {
+    const obj: Record<string, string> = {};
+    if (Array.isArray(attrs)) { for (const a of attrs) obj[a.key ?? a[0]] = String(a.value ?? a[1] ?? '').slice(0, 100); }
+    else if (attrs && typeof attrs === 'object') { for (const [k, v] of Object.entries(attrs)) obj[k] = String(v).slice(0, 100); }
+    return obj;
+  };
+
+  const renderSpan = (node: any, depth: number) => {
+    if (!node) return null;
+    const name = node.name || '?';
+    const spanId = node.span_id || name + depth;
+    const dur = node.end_time_unix_nano && node.start_time_unix_nano ? node.end_time_unix_nano - node.start_time_unix_nano : null;
+    const durMs = dur !== null ? (dur / 1e6) : null;
+    const isPending = !node.end_time_unix_nano;
+    const isError = node.status === 'error';
+    const attrsObj = parseAttrs(node.attributes);
+    const hasAttrs = Object.keys(attrsObj).length > 0;
+    const isOpen = expanded[spanId];
+    const hasChildren = node.children && node.children.length > 0;
+    const offset = ((node.start_time_unix_nano || minStart) - minStart) / totalWindow;
+    const width = dur !== null ? Math.max(2, (dur / totalWindow) * 100) : 0;
+
+    return (
+      <div key={spanId}>
+        <div
+          className={['flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px]', 'hover:bg-surface-2 cursor-pointer', isError ? 'bg-danger/5' : ''].join(' ')}
+          style={{ paddingLeft: `${depth * 14 + 4}px` }}
+          onClick={() => (hasAttrs || hasChildren) && toggle(spanId)}
+        >
+          {depth > 0 && <span className="text-border text-[10px]">├─</span>}
+          <div className="relative h-3 w-10 shrink-0 overflow-hidden rounded-sm bg-surface-2">
+            <div className={['absolute top-0 h-full rounded-sm', isError ? 'bg-danger/60' : isPending ? 'bg-accent/40' : 'bg-accent/50', isPending ? 'animate-pulse' : ''].join(' ')}
+              style={{ left: `${offset * 100}%`, width: `${Math.max(width, 8)}%` }} />
+          </div>
+          <span className={['min-w-[100px] shrink-0 font-mono', isError ? 'text-danger' : 'text-fg/80'].join(' ')}>{name}</span>
+          <span className="tnum w-12 shrink-0 text-right text-muted">
+            {durMs !== null ? (durMs < 1000 ? `${durMs.toFixed(0)}ms` : `${(durMs / 1000).toFixed(1)}s`) : '⟳'}
+          </span>
+          <span className={['inline-flex h-4 w-7 items-center justify-center rounded text-[9px] font-medium', isError ? 'bg-danger/15 text-danger' : isPending ? 'bg-accent/15 text-accent' : 'bg-ok/15 text-ok'].join(' ')}>
+            {isError ? 'ERR' : isPending ? '⋯' : 'OK'}
+          </span>
+          {(hasAttrs || hasChildren) && <span className="text-muted transition-transform" style={{ transform: isOpen ? 'rotate(90deg)' : '' }}>▶</span>}
+        </div>
+        {isOpen && hasAttrs && (
+          <div className="ml-8 mt-0.5 mb-1 rounded border border-border/50 bg-bg p-1.5">
+            <div className="space-y-0.5 text-[10px]">
+              {Object.entries(attrsObj).slice(0, 6).map(([k, v]) => (
+                <div key={k} className="flex gap-1"><span className="text-muted">└─ {k}:</span><span className="truncate font-mono text-fg/70">{v}</span></div>
+              ))}
+            </div>
+          </div>
+        )}
+        {isOpen && hasChildren && node.children.map((child: any) => renderSpan(child, depth + 1))}
+      </div>
+    );
+  };
+
   return (
     <div className="rounded-lg border border-border bg-surface">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <h3 className="text-xs font-medium">
-          Trace Spans <span className="text-muted">({spans.length})</span>
-        </h3>
-        {traceId && (
-          <a
-            href={`http://127.0.0.1:3113/traces?trace_id=${traceId}`}
-            target="_blank"
-            rel="noreferrer"
-            className="text-[11px] text-accent hover:underline"
-          >
-            在 Console 中打开 →
-          </a>
-        )}
+        <div className="flex items-center gap-2">
+          <h3 className="text-xs font-medium">OTel Trace{spanCount > 0 && <span className="text-muted"> ({spanCount} spans)</span>}</h3>
+          {loading && <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />}
+        </div>
+        <div className="flex items-center gap-2">
+          {traceId && <span className="font-mono text-[10px] text-muted">{traceId.slice(0, 8)}…</span>}
+          <a href={`http://127.0.0.1:3113/#/traces?trace_id=${traceId}`} target="_blank" rel="noreferrer"
+            className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent transition hover:bg-accent/20">↗ Console</a>
+        </div>
       </div>
-      <div className="max-h-48 overflow-auto">
-        <table className="w-full text-[11px]">
-          <thead className="sticky top-0 bg-surface text-muted">
-            <tr className="text-left">
-              <th className="px-3 py-1.5 font-medium">操作</th>
-              <th className="px-2 py-1.5 font-medium">状态</th>
-              <th className="px-2 py-1.5 font-medium">耗时</th>
-            </tr>
-          </thead>
-          <tbody>
-            {spans.map((s: any, i: number) => {
-              const dur = s.end_time_unix_nano && s.start_time_unix_nano
-                ? `${((s.end_time_unix_nano - s.start_time_unix_nano) / 1e6).toFixed(0)}ms`
-                : s.status === 'unset' ? '进行中…' : '—';
-              const isError = s.status === 'error';
-              return (
-                <tr key={i} className="border-t border-border/50 hover:bg-surface-2">
-                  <td className="px-3 py-1 font-mono text-fg/80">{s.name || '?'}</td>
-                  <td className="px-2 py-1">
-                    <span className={[
-                      'inline-flex h-4 items-center rounded px-1 text-[10px] font-medium',
-                      isError ? 'bg-danger/15 text-danger' : 'bg-ok/15 text-ok',
-                    ].join(' ')}>
-                      {isError ? 'ERR' : 'OK'}
-                    </span>
-                  </td>
-                  <td className="px-2 py-1 tnum text-muted">{dur}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="max-h-72 overflow-auto p-1">
+        {spanCount === 0 && loading ? (
+          <div className="space-y-2 p-2">{[1, 2, 3].map((i) => <div key={i} className="h-5 w-full animate-pulse rounded bg-surface-2" />)}</div>
+        ) : spanCount === 0 ? (
+          <div className="px-2 py-6 text-center text-xs text-muted">等待 trace 数据…<br /><span className="text-[10px]">Worker 执行中，span 将在步骤完成后上报</span></div>
+        ) : tree?.roots?.map((root: any) => renderSpan(root, 0))}
       </div>
     </div>
   );
