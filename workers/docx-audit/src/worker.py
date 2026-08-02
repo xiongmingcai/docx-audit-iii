@@ -34,6 +34,68 @@ from .config_functions import fn_config_get, fn_config_set
 UI_PROGRESS_FN = "docx::ui_progress"
 
 
+# ── 错误处理策略 ───────────────────────────────────────────
+
+import httpx as _httpx
+
+# 可重试错误：网络类 → Queue 重试
+_RETRYABLE = (
+    _httpx.TimeoutException,
+    _httpx.ConnectError,
+    _httpx.RemoteProtocolError,
+    ConnectionError,
+    OSError,
+    TimeoutError,
+)
+
+# 不可重试错误：数据/权限类 → 标记 job 失败
+_FAILABLE = (
+    PermissionError,
+    FileNotFoundError,
+    ValueError,
+    KeyError,
+    TypeError,
+)
+
+
+async def _handle_error(iii, job_id: str, e: Exception, context: str = "") -> str:
+    """
+    统一错误处理入口。
+    返回动作: "retry" | "failed" | "ignored"
+    """
+    from pathlib import Path as _Path
+    import time as _time
+
+    if isinstance(e, _RETRYABLE):
+        # 可重试：记日志后抛出，让 Queue 重试
+        await _emit_log(iii, "warning", f"[retry] {context}: {str(e)[:150]}", {
+            "job_id": job_id, "error_type": type(e).__name__,
+        })
+        raise
+
+    # 不可重试：标记 job 失败
+    error_msg = f"{type(e).__name__}: {str(e)[:180]}"
+    try:
+        if iii is not None:
+            await iii.trigger_async({
+                "function_id": "state::update",
+                "payload": {
+                    "scope": "docx-audit-jobs", "key": job_id,
+                    "ops": [
+                        {"type": "set", "path": "step", "value": "failed"},
+                        {"type": "set", "path": "error", "value": error_msg},
+                    ],
+                },
+            })
+    except Exception:
+        pass  # state 更新失败不抛出，避免掩盖原始错误
+
+    await _emit_log(iii, "error", f"[failed] {context}: {error_msg}", {
+        "job_id": "job_id", "error_type": type(e).__name__,
+    })
+    return "failed"
+
+
 # ── 辅助 ─────────────────────────────────────────────────
 
 def _build_parse_payload(path, file_bytes):
@@ -581,21 +643,7 @@ async def fn_quality_batch(payload: dict, iii=None) -> dict:
             {"batch_index": batch_index, "total_batches": _total_batches, "para_count": len(elements)},
             lambda: check_paragraph_quality_agent(elements))
     except Exception as e:
-        await _emit_log(local_iii, "error", f"Agent 质检失败: batch_{batch_index}", {
-            "job_id": job_id, "batch_index": batch_index, "error": str(e)[:200],
-        })
-        # 抛出异常让 Queue 重试；同时把错误写入 state 便于排查
-        if local_iii is not None:
-            try:
-                await local_iii.trigger_async({
-                    "function_id": "state::update",
-                    "payload": {
-                        "scope": "docx-audit-jobs", "key": job_id,
-                        "ops": [{"type": "set", "path": "error", "value": f"batch_{batch_index}: {str(e)[:200]}"}],
-                    },
-                })
-            except Exception:
-                pass
+        await _handle_error(local_iii, job_id, e, f"Agent 质检 batch_{batch_index}")
         raise
 
     # 原子完成：单次 RPC 替代原来的 4-5 次独立操作
@@ -611,10 +659,8 @@ async def fn_quality_batch(payload: dict, iii=None) -> dict:
                 },
             })
         except Exception as e:
-            await _emit_log(local_iii, "error", f"batch_complete 失败: batch_{batch_index}", {
-                "job_id": job_id, "error": str(e)[:200],
-            })
-            raise  # 抛出让 Queue 重试
+            await _handle_error(local_iii, job_id, e, f"batch_complete batch_{batch_index}")
+            raise
 
     return {"job_id": job_id, "batch_index": batch_index, "issues": issues}
 
