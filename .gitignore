@@ -51,3 +51,15 @@ coverage/
 *.temp
 plan/test-*.mjs
 plan/test-*.cjs
+
+# MinerU test artifacts
+docs/mineru/verify/output-*.md
+docs/mineru/verify/*.pdf
+
+# Root-level duplicates (dependencies belong in frontend/)
+package.json
+package-lock.json
+
+# Audit report outputs
+workers/docx-audit/reports/*.csv
+workers/docx-audit/reports/*.docx
