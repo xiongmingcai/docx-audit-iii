@@ -28,7 +28,7 @@ from .agent_checks import (
     fn_check_table_refs_agent,
 )
 from .report import fn_generate_report
-from .config_functions import fn_config_get, fn_config_set, fn_config_test
+from .config_functions import fn_config_get, fn_config_set
 
 # 浏览器注册的进度推送 Function（后端 fire-and-forget 触发，引擎经 WebSocket 推到浏览器）
 UI_PROGRESS_FN = "docx::ui_progress"
@@ -867,10 +867,9 @@ def main():
     iii.register_function("docx::check_paragraph_quality", fn_check_paragraph_quality)
     iii.register_function("docx::generate_report", fn_generate_report)
 
-    # 配置读写 / 测试 Function
+    # 配置读写 Function
     iii.register_function("docx::config_get", fn_config_get)
     iii.register_function("docx::config_set", fn_config_set)
-    iii.register_function("docx::config_test", fn_config_test)
 
     # 编排 Function：闭包注入 iii，使内部 trigger 可走引擎
     async def audit_with_iii(payload: dict) -> dict:

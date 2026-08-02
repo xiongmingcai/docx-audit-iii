@@ -11,9 +11,6 @@ import { useStore, connect, reconnect } from '@/store';
 import {
   getProjectSettings,
   setProjectSettings,
-  testLLMConnection,
-  testEmbeddingConnection,
-  testRerankerConnection,
   DEFAULT_SETTINGS,
   type ProjectSettings,
 } from '@/sdk/settings';
@@ -38,7 +35,6 @@ export function Settings() {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [showKey, setShowKey] = useState<Record<string, boolean>>({});
-  const [testStates, setTestStates] = useState<Record<string, { status: 'idle' | 'ok' | 'err'; ms?: number; msg?: string }>>({});
 
   // ── 从 iii-state 加载配置 ──────────────────────────────────────────────
   useEffect(() => {
@@ -87,42 +83,6 @@ export function Settings() {
       setSaving(false);
     }
   };
-
-  // ── 测试连接（通用）───────────────────────────────────────────────────────
-  const testConnection = async (
-    key: string,
-    fn: (client: Awaited<ReturnType<typeof connect>>) => Promise<{ ok: boolean; ms: number; msg: string }>,
-  ) => {
-    setTestStates((s) => ({ ...s, [key]: { status: 'idle' } }));
-    try {
-      const client = await connect();
-      const result = await fn(client);
-      setTestStates((s) => ({ ...s, [key]: { status: result.ok ? 'ok' : 'err', ms: result.ms, msg: result.msg } }));
-    } catch (e) {
-      setTestStates((s) => ({ ...s, [key]: { status: 'err', msg: e instanceof Error ? e.message : String(e) } }));
-    }
-  };
-
-  const testLLM = () => testConnection('llm', (c) =>
-    testLLMConnection(c, { baseUrl: form.llm.baseUrl, apiKey: form.llm.apiKey, model: form.llm.model }),
-  );
-  const testEmbedding = () => testConnection('embedding', (c) =>
-    testEmbeddingConnection(c, {
-      baseUrl: form.embedding.inheritLlm ? form.llm.baseUrl : form.embedding.baseUrl,
-      apiKey: form.embedding.inheritLlm ? form.llm.apiKey : form.embedding.apiKey,
-      model: form.embedding.model,
-      dims: form.embedding.dims,
-    }),
-  );
-  const testReranker = () => testConnection('reranker', (c) =>
-    testRerankerConnection(c, {
-      baseUrl: form.reranker.inheritLlm ? form.llm.baseUrl : form.reranker.baseUrl,
-      apiKey: form.reranker.inheritLlm ? form.llm.apiKey : form.reranker.apiKey,
-      model: form.reranker.model,
-      topN: form.reranker.topN,
-      maxLength: form.reranker.maxLength,
-    }),
-  );
 
   // ── 重置 ─────────────────────────────────────────────────────────────────
   const onReset = async () => {
@@ -216,12 +176,6 @@ export function Settings() {
               />
             </Field>
 
-            <div className="mt-2 flex items-center gap-3">
-              <button onClick={testLLM} className="h-7 rounded-md border border-border px-3 text-xs text-muted hover:bg-surface-2 hover:text-fg">
-                测试连接
-              </button>
-              <TestBadge state={testStates.llm} />
-            </div>
           </Card>
 
           {/* Embedding 卡片 */}
@@ -256,18 +210,6 @@ export function Settings() {
                   type="number"
                 />
               </Field>
-            </div>
-            <div className="mt-2 flex items-center gap-3">
-              <button onClick={testEmbedding} disabled={form.embedding.inheritLlm}
-                className={[
-                  'h-7 rounded-md border border-border px-3 text-xs transition',
-                  form.embedding.inheritLlm ? 'opacity-40 cursor-not-allowed text-muted' : 'text-muted hover:bg-surface-2 hover:text-fg',
-                ].join(' ')}
-                title={form.embedding.inheritLlm ? '继承 LLM 配置时无需单独测试' : '测试 Embedding 连接'}
-              >
-                测试连接
-              </button>
-              <TestBadge state={testStates.embedding} />
             </div>
           </Card>
 
@@ -309,18 +251,6 @@ export function Settings() {
                   type="number"
                 />
               </Field>
-            </div>
-            <div className="mt-2 flex items-center gap-3">
-              <button onClick={testReranker} disabled={form.reranker.inheritLlm}
-                className={[
-                  'h-7 rounded-md border border-border px-3 text-xs transition',
-                  form.reranker.inheritLlm ? 'opacity-40 cursor-not-allowed text-muted' : 'text-muted hover:bg-surface-2 hover:text-fg',
-                ].join(' ')}
-                title={form.reranker.inheritLlm ? '继承 LLM 配置时无需单独测试' : '测试 Reranker 连接'}
-              >
-                测试连接
-              </button>
-              <TestBadge state={testStates.reranker} />
             </div>
           </Card>
 
@@ -433,18 +363,3 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
   );
 }
 
-function TestBadge({ state }: { state?: { status: 'idle' | 'ok' | 'err'; ms?: number; msg?: string } }) {
-  if (!state || state.status === 'idle') return null;
-  if (state.status === 'ok') {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs text-ok">
-        ● 可用 · {state.ms}ms{state.msg ? ` · ${state.msg}` : ''}
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1 text-xs text-danger">
-      × 失败 · {state.msg}
-    </span>
-  );
-}
