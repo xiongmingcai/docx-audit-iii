@@ -136,100 +136,50 @@ function extractErrorMsg(e: unknown): string {
 }
 
 /**
- * 测试 LLM 连通性（通过 config_set 写入临时值后探测）
+ * 测试连通性（LLM / Embedding / Reranker）
+ *
+ * 通过 docx::config_test 向目标端点发送真实请求验证配置，
+ * 不写入任何配置。这是唯一推荐的测试方式。
  */
-export async function testLLMConnection(
+async function _testConnection(
+  client: EngineClient,
+  kind: 'llm' | 'embedding' | 'reranker',
+  cfg: { baseUrl: string; apiKey: string; model: string },
+): Promise<{ ok: boolean; ms: number; msg: string }> {
+  try {
+    const res = await client.trigger<
+      { kind: string; baseUrl: string; apiKey: string; model: string },
+      { ok: boolean; ms: number; msg: string }
+    >({
+      function_id: 'docx::config_test',
+      payload: { kind, baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model },
+    });
+    return res ?? { ok: false, ms: 0, msg: '空响应' };
+  } catch (e) {
+    return { ok: false, ms: 0, msg: extractErrorMsg(e) };
+  }
+}
+
+/** 测试 LLM 连通性 — 发送 1 token 的 chat 请求验证模型真实可用 */
+export function testLLMConnection(
   client: EngineClient,
   cfg: { baseUrl: string; apiKey: string; model: string },
 ): Promise<{ ok: boolean; ms: number; msg: string }> {
-  const t0 = Date.now();
-  try {
-    const res = await client.trigger<
-      Record<string, string>,
-      { written: string[]; error?: string }
-    >({
-      function_id: 'docx::config_set',
-      payload: {
-        LLM_MODEL: cfg.model,
-        LLM_BASE_URL: cfg.baseUrl,
-        ...(cfg.apiKey ? { LLM_API_KEY: cfg.apiKey } : {}),
-      },
-    });
-    // 函数可能返回 {error} 而非抛出
-    if (res && typeof res === 'object' && 'error' in res && res.error) {
-      return { ok: false, ms: Date.now() - t0, msg: String(res.error) };
-    }
-    return { ok: true, ms: Date.now() - t0, msg: `已写入 ${res.written?.length ?? 0} 项` };
-  } catch (e) {
-    return { ok: false, ms: Date.now() - t0, msg: extractErrorMsg(e) };
-  }
+  return _testConnection(client, 'llm', cfg);
 }
 
-/**
- * 测试 Embedding 连通性
- * 通过创建一个临时 embedding 任务来验证配置是否有效。
- * 实际测试：写入 config 后尝试创建一个简单的 embedding 请求。
- */
-export async function testEmbeddingConnection(
+/** 测试 Embedding 连通性 — 发送短文本验证返回向量维度 */
+export function testEmbeddingConnection(
   client: EngineClient,
   cfg: { baseUrl: string; apiKey: string; model: string; dims?: string },
 ): Promise<{ ok: boolean; ms: number; msg: string }> {
-  const t0 = Date.now();
-  try {
-    // 先写入配置
-    const setRes = await client.trigger<Record<string, string>, { written: string[]; error?: string }>({
-      function_id: 'docx::config_set',
-      payload: {
-        EMBEDDING_MODEL: cfg.model,
-        EMBEDDING_BASE_URL: cfg.baseUrl,
-        EMBEDDING_ENABLED: 'true',
-        ...(cfg.apiKey ? { EMBEDDING_API_KEY: cfg.apiKey } : {}),
-        ...(cfg.dims ? { EMBEDDING_DIMS: cfg.dims } : {}),
-      },
-    });
-    if (setRes && typeof setRes === 'object' && 'error' in setRes && setRes.error) {
-      return { ok: false, ms: Date.now() - t0, msg: String(setRes.error) };
-    }
-    // 尝试调用 embedding 验证连通性（通过 docx::config_get 确认写入成功）
-    const check = await client.trigger<Record<string, unknown>, any>({
-      function_id: 'docx::config_get',
-      payload: {},
-    });
-    const embModel = check?.embedding?.EMBEDDING_MODEL;
-    if (embModel && (typeof embModel === 'string' || (typeof embModel === 'object' && 'value' in embModel))) {
-      return { ok: true, ms: Date.now() - t0, msg: `配置已写入` };
-    }
-    return { ok: true, ms: Date.now() - t0, msg: `已写入 ${setRes.written?.length ?? 0} 项` };
-  } catch (e) {
-    return { ok: false, ms: Date.now() - t0, msg: extractErrorMsg(e) };
-  }
+  return _testConnection(client, 'embedding', cfg);
 }
 
-/**
- * 测试 Reranker 连通性
- */
-export async function testRerankerConnection(
+/** 测试 Reranker 连通性 — 发送 query + documents 验证排序返回 */
+export function testRerankerConnection(
   client: EngineClient,
   cfg: { baseUrl: string; apiKey: string; model: string; topN?: number; maxLength?: number },
 ): Promise<{ ok: boolean; ms: number; msg: string }> {
-  const t0 = Date.now();
-  try {
-    const setRes = await client.trigger<Record<string, string>, { written: string[]; error?: string }>({
-      function_id: 'docx::config_set',
-      payload: {
-        RERANKER_MODEL: cfg.model,
-        RERANKER_BASE_URL: cfg.baseUrl,
-        RERANKER_ENABLED: 'true',
-        ...(cfg.apiKey ? { RERANKER_API_KEY: cfg.apiKey } : {}),
-        ...(cfg.topN ? { RERANKER_TOP_N: String(cfg.topN) } : {}),
-        ...(cfg.maxLength ? { RERANKER_MAX_LENGTH: String(cfg.maxLength) } : {}),
-      },
-    });
-    if (setRes && typeof setRes === 'object' && 'error' in setRes && setRes.error) {
-      return { ok: false, ms: Date.now() - t0, msg: String(setRes.error) };
-    }
-    return { ok: true, ms: Date.now() - t0, msg: `已写入 ${setRes.written?.length ?? 0} 项` };
-  } catch (e) {
-    return { ok: false, ms: Date.now() - t0, msg: extractErrorMsg(e) };
-  }
+  return _testConnection(client, 'reranker', cfg);
 }
