@@ -77,10 +77,12 @@ def _mask(secret: str) -> str:
 
 
 def get_all_safe() -> dict[str, dict]:
-    """返回所有已配置 key 的安全视图（不含完整 secret）。"""
-    data = _load()
+    """返回所有已配置 key 的安全视图（不含完整 secret）。
+
+    使用 get() 读取，自动覆盖 iii-state → config.json → 环境变量 三级优先级，
+    确保前端通过 docx::config_get 能看到 Settings 页面保存到 iii-state 的配置。
+    """
     out: dict[str, dict] = {}
-    # 按分组输出
     groups = {
         "llm": ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"],
         "embedding": [
@@ -105,12 +107,12 @@ def get_all_safe() -> dict[str, dict]:
     for group, keys in groups.items():
         out[group] = {}
         for k in keys:
-            val = data.get(k)
+            val = get(k)  # ← 使用 get() 而非 data.get()，覆盖 iii-state
             is_secret = "KEY" in k.upper()
             if is_secret:
                 out[group][k] = {"set": bool(val), "hint": _mask(str(val)) if val else ""}
             else:
-                out[group][k] = val
+                out[group][k] = val if val else ""
     return out
 
 

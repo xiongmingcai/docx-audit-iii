@@ -1045,8 +1045,10 @@ def main():
     iii.register_function("docx::check_paragraph_quality", fn_check_paragraph_quality)
     iii.register_function("docx::generate_report", fn_generate_report)
 
-    # 配置读写 Function
-    iii.register_function("docx::config_get", fn_config_get)
+    # 配置读写 Function（注入 iii 以实时读取 iii-state）
+    async def config_get_with_iii(payload: dict) -> dict:
+        return await fn_config_get(payload, iii=iii)
+    iii.register_function("docx::config_get", config_get_with_iii)
     iii.register_function("docx::config_set", fn_config_set)
 
     # 编排 Function：闭包注入 iii，使内部 trigger 可走引擎
