@@ -718,13 +718,15 @@ async function pollJobStatus(jobId: string): Promise<void> {
   }
 }
 
-/** 启动轮询定时器（幂等）。 */
+/** 启动轮询定时器（幂等）。push 为主通道，poll 做兜底。 */
 export function startPolling(): void {
   if (pollTimer) return;
   pollTimer = setInterval(() => {
     if (pollJobs.size === 0) return;
+    // 页面隐藏时暂停轮询，减少后台请求
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     pollJobs.forEach((id) => void pollJobStatus(id));
-  }, 3000);
+  }, 5000);
 }
 
 /** 清除已完成的 job（success），保留运行中和失败的。 */
