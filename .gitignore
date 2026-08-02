@@ -60,6 +60,9 @@ docs/mineru/verify/*.pdf
 package.json
 package-lock.json
 
+# Frontend dependencies (installed in frontend/node_modules)
+frontend/node_modules/
+
 # Audit report outputs
 workers/docx-audit/reports/*.csv
 workers/docx-audit/reports/*.docx
