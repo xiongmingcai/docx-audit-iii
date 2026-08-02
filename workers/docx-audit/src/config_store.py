@@ -142,7 +142,7 @@ def _get_from_state(key: str) -> Any:
         from iii import register_worker
         import os
 
-        state = _state_get_cached(DEFAULT_PROJECT)
+        state = _state_get_once(DEFAULT_PROJECT)
         if not state:
             return None
 
@@ -167,61 +167,27 @@ def _get_from_state(key: str) -> Any:
         return None
 
 
-_state_cache: dict = {}
-_state_cache_time: float = 0
-_state_reader = None
+def _state_get_once(project_id: str) -> dict:
+    """单次短连接读取 iii-state（无全局单例，无缓存）。
 
-
-def _get_state_reader():
-    """获取或创建 state reader worker 连接（单例）。"""
-    global _state_reader
-    if _state_reader is None:
-        try:
-            from iii import register_worker
-            import os
-            url = os.getenv("III_ENGINE_URL", "ws://localhost:49134")
-            _state_reader = register_worker(url, options={"workerName": "docx-audit-state-reader"})
-        except Exception:
-            return None
-    return _state_reader
-
-
-def _state_get_cached(project_id: str) -> dict:
-    """带缓存的 state 读取（缓存 10s）。"""
-    import time
+    Settings 读取频率低（仅前端打开设置页时），无需缓存。
+    每次创建新连接，避免全局单例的连接泄漏和重连问题。
+    """
     import asyncio
-    global _state_cache, _state_cache_time
-    now = time.time()
-    if now - _state_cache_time < 10 and _state_cache:
-        return _state_cache
+    from iii import register_worker
+
+    url = os.getenv("III_ENGINE_URL", "ws://localhost:49134")
+    reader = register_worker(url, options={
+        "workerName": "docx-audit-state-reader",
+        "invocation_timeout_ms": 10_000,
+    })
     try:
-        reader = _get_state_reader()
-        if reader is None:
-            return _state_cache
-        # 使用已缓存的 loop 或创建新的
-        try:
-            loop = asyncio.get_running_loop()
-            # 如果在已有 loop 中，用 run_coroutine_threadsafe
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, reader.trigger_async({
-                    "function_id": "state::get",
-                    "payload": {"scope": f"project:{project_id}", "key": "settings"},
-                }))
-                result = future.result(timeout=10)
-        except RuntimeError:
-            # 无 running loop，直接 asyncio.run
-            result = asyncio.run(reader.trigger_async({
-                "function_id": "state::get",
-                "payload": {"scope": f"project:{project_id}", "key": "settings"},
-            }))
-        if result and isinstance(result, dict):
-            _state_cache = result
-            _state_cache_time = now
-            return result
+        return asyncio.run(reader.trigger_async({
+            "function_id": "state::get",
+            "payload": {"scope": f"project:{project_id}", "key": "settings"},
+        }))
     except Exception:
-        pass
-    return _state_cache
+        return {}
 
 
 def get_effective() -> dict[str, Any]:

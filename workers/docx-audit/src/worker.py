@@ -831,12 +831,14 @@ async def fn_batch_complete(payload: dict, iii=None) -> dict:
 
 
 def _make_state_client():
-    """Queue consumer 自建 iii 客户端（仅用于读写 state）。"""
+    """Queue consumer 自建 iii 客户端（短连接，每次调用创建新连接）。"""
     try:
         from iii import register_worker
-        import os
         url = os.getenv("III_ENGINE_URL", "ws://localhost:49134")
-        return register_worker(url, options={"workerName": "docx-audit-state-reader"})
+        return register_worker(url, options={
+            "workerName": "docx-audit-state-reader",
+            "invocation_timeout_ms": 30_000,
+        })
     except Exception:
         return None
 
