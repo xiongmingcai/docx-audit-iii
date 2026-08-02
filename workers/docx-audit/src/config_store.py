@@ -13,14 +13,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .models import _ROOT
-
-# 沙箱内写 /workspace/config.json（与 src 平级）；本地写 workers/docx-audit/config
-_SANDBOX = Path("/workspace")
-if _SANDBOX.exists():
-    CONFIG_PATH = _SANDBOX / "config.json"
-else:
-    CONFIG_PATH = _ROOT / "config.json"
+from .models import CONFIG_PATH
 
 # 允许外部配置的 key 白名单（与前端设置页字段一一对应）
 ALLOWED_KEYS = {

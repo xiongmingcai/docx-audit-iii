@@ -41,6 +41,15 @@ PROJECTS_DIR = DATA_ROOT / "projects"
 TEMPLATES_DIR = DATA_ROOT / "templates"
 DEFAULT_PROJECT = os.getenv("DEFAULT_PROJECT", "M1212")
 
+# ── 统一路径常量（适配本地开发 + 沙箱双布局）──────────────────────────────
+REPORTS_DIR = _ROOT / "reports"
+CONFIG_DIR = _ROOT / "config"
+CONFIG_PATH = CONFIG_DIR / "config.json"
+
+# 确保目录存在（模块加载时一次性创建）
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
 NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 PRIORITY_MAP = {

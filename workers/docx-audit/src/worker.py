@@ -15,7 +15,7 @@ from pathlib import Path
 from opentelemetry import trace as otel_trace
 from opentelemetry.trace import SpanKind
 
-from .models import III_ENGINE_URL, LLM_API_KEY, issues_to_dicts, _ROOT
+from .models import III_ENGINE_URL, LLM_API_KEY, issues_to_dicts, REPORTS_DIR
 from .parse import fn_parse
 from .static_checks import (
     fn_check_ai_traces,
@@ -706,7 +706,7 @@ async def fn_quality_finalize(payload: dict, iii=None) -> dict:
             "payload": {
                 "elements": [],  # 报告不需要 elements，只需 issues
                 "issues": all_issues,
-                "output_path": str(_ROOT / "reports" / f"{job_id}_audit_report.docx"),
+                "output_path": str(REPORTS_DIR / f"{job_id}_audit_report.docx"),
                 "source_name": filename,
             },
         }))
