@@ -598,60 +598,190 @@ async def fn_quality_batch(payload: dict, iii=None) -> dict:
                 pass
         raise
 
-    # 更新状态
+    # 原子完成：单次 RPC 替代原来的 4-5 次独立操作
     if local_iii is not None:
         try:
             await local_iii.trigger_async({
-                "function_id": "state::update",
+                "function_id": "docx::batch_complete",
                 "payload": {
-                    "scope": "docx-audit-jobs",
-                    "key": job_id,
-                    "ops": [
-                        {"type": "append", "path": "agent_issues", "value": issues},
-                        {"type": "increment", "path": "done_batches", "by": 1},
-                        {"type": "append", "path": "batch_ok", "value": batch_index},
-                    ],
+                    "job_id": job_id,
+                    "batch_index": batch_index,
+                    "issues": issues,
+                    "filename": payload.get("filename", "audit"),
                 },
             })
-            # 读取最新状态，计算 issue_count，推送进度
-            updated = await local_iii.trigger_async({
-                "function_id": "state::get",
-                "payload": {"scope": "docx-audit-jobs", "key": job_id},
-            })
-            if updated and isinstance(updated, dict):
-                done = updated.get("done_batches", 0)
-                total = updated.get("total_batches", 0)
-                agent_issues = updated.get("agent_issues") or []
-                static_issues = updated.get("static_issues") or []
-                issue_count = len(agent_issues) + len(static_issues)
-                # 同步 issue_count 到 state
-                await local_iii.trigger_async({
-                    "function_id": "state::update",
-                    "payload": {
-                        "scope": "docx-audit-jobs",
-                        "key": job_id,
-                        "ops": [{"type": "set", "path": "issue_count", "value": issue_count}],
-                    },
-                })
-                # 推送进度到浏览器（含活动事件）
-                await _push_progress(local_iii, {
-                    "job_id": job_id, "step": "agent_running",
-                    "done_batches": done, "total_batches": total,
-                    "total_paras": updated.get("total_paras", 0),
-                    "issue_count": issue_count,
-                    "activity": {"type": "agent_call", "message": f"第 {batch_index+1}/{total} 批完成，发现 {len(issues)} 个语言问题", "at": int(_time.time()*1000)},
-                })
-                # 全部完成 → 触发 finalize
-                if done >= total and total > 0:
-                    await local_iii.trigger_async({
-                        "function_id": "docx::quality_finalize",
-                        "payload": {"job_id": job_id, "filename": payload.get("filename", "audit")},
-                        "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="default"),
-                    })
         except Exception as e:
-            print(f"    [quality_batch] state update error: {e}")
+            await _emit_log(local_iii, "error", f"batch_complete 失败: batch_{batch_index}", {
+                "job_id": job_id, "error": str(e)[:200],
+            })
+            raise  # 抛出让 Queue 重试
 
     return {"job_id": job_id, "batch_index": batch_index, "issues": issues}
+
+
+async def fn_job_reaper(payload: dict = None, iii=None) -> dict:
+    """
+    Function: docx::job_reaper — 补偿卡住的 job。
+
+    由 engine cron 每 30s 触发，扫描：
+    - agent_running 且 done >= total 但 finalize 未触发 → 补触发
+    - agent_running 超过 10 分钟 → 标记超时失败
+
+    Input:  {} (无参数)
+    Output: { scanned, recovered }
+    """
+    import time as _time
+    if iii is None:
+        iii = _make_state_client()
+    if iii is None:
+        return {"scanned": 0, "recovered": 0}
+
+    resp = await iii.trigger_async({
+        "function_id": "state::list",
+        "payload": {"scope": "docx-audit-jobs", "limit": 200},
+    })
+    jobs = resp if isinstance(resp, list) else []
+    now = _time.time()
+    recovered = 0
+
+    for job_entry in jobs:
+        job_id = job_entry.get("key", "") if isinstance(job_entry, dict) else ""
+        val = job_entry.get("value", {}) if isinstance(job_entry, dict) else {}
+        if not job_id or not isinstance(val, dict):
+            continue
+
+        step = val.get("step", "")
+        if step in ("completed", "failed"):
+            continue
+
+        updated_at = val.get("updated_at", now)
+        idle_sec = now - updated_at
+
+        if step == "agent_running":
+            done = val.get("done_batches", 0)
+            total = val.get("total_batches", 0)
+
+            if done >= total and total > 0 and idle_sec > 60:
+                # batch 全部完成但 finalize 未触发 → 补偿
+                await iii.trigger_async({
+                    "function_id": "docx::quality_finalize",
+                    "payload": {"job_id": job_id, "filename": val.get("filename", "audit")},
+                    "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="default"),
+                })
+                recovered += 1
+                await _emit_log(iii, "warning", f"[reaper] 补偿触发 finalize: {job_id}", {
+                    "job_id": job_id, "done": done, "total": total, "idle_sec": int(idle_sec),
+                })
+            elif total > 0 and idle_sec > 600:
+                # 10 分钟未完成 → 超时
+                await iii.trigger_async({
+                    "function_id": "state::update",
+                    "payload": {"scope": "docx-audit-jobs", "key": job_id,
+                               "ops": [{"type": "set", "path": "step", "value": "failed"},
+                                       {"type": "set", "path": "error", "value": "timeout: 审核超时（10min）"}]},
+                })
+                recovered += 1
+                await _emit_log(iii, "warning", f"[reaper] 标记超时: {job_id}", {
+                    "job_id": job_id, "idle_sec": int(idle_sec),
+                })
+
+        elif step == "finalizing" and idle_sec > 300:
+            # finalizing 超过 5 分钟 → 重试
+            await iii.trigger_async({
+                "function_id": "docx::quality_finalize",
+                "payload": {"job_id": job_id, "filename": val.get("filename", "audit")},
+                "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="default"),
+            })
+            recovered += 1
+            await _emit_log(iii, "warning", f"[reaper] 重试 finalize: {job_id}", {
+                "job_id": job_id, "idle_sec": int(idle_sec),
+            })
+
+    return {"scanned": len(jobs), "recovered": recovered}
+
+
+async def fn_batch_complete(payload: dict, iii=None) -> dict:
+    """
+    Function: docx::batch_complete — 原子完成一次 batch。
+
+    单次 RPC 完成：追加 issues + 递增计数 + 标记完成 + 推送进度 +
+    判断是否全部完成并触发 finalize。替代原来的 4-5 次独立 state 操作。
+
+    Input:  { job_id, batch_index, issues, filename }
+    Output: { job_id, done, total, finalized: bool }
+    """
+    import time as _time
+    job_id = payload.get("job_id", "")
+    batch_index = payload.get("batch_index", 0)
+    issues = payload.get("issues", [])
+    filename = payload.get("filename", "audit")
+
+    if iii is None:
+        iii = _make_state_client()
+    if iii is None:
+        return {"job_id": job_id, "done": 0, "total": 0, "finalized": False}
+
+    # 1. 原子更新（单次 RPC，引擎侧保证一致性）
+    await iii.trigger_async({
+        "function_id": "state::update",
+        "payload": {
+            "scope": "docx-audit-jobs",
+            "key": job_id,
+            "ops": [
+                {"type": "append", "path": "agent_issues", "value": issues},
+                {"type": "increment", "path": "done_batches", "by": 1},
+                {"type": "append", "path": "batch_ok", "value": batch_index},
+            ],
+        },
+    })
+
+    # 2. 读取最新状态
+    job = await iii.trigger_async({
+        "function_id": "state::get",
+        "payload": {"scope": "docx-audit-jobs", "key": job_id},
+    })
+    if not job or not isinstance(job, dict):
+        return {"job_id": job_id, "done": 0, "total": 0, "finalized": False}
+
+    done = job.get("done_batches", 0)
+    total = job.get("total_batches", 0)
+    agent_issues_flat = []
+    for batch in (job.get("agent_issues") or []):
+        if isinstance(batch, list):
+            agent_issues_flat.extend(batch)
+        else:
+            agent_issues_flat.append(batch)
+    issue_count = len(agent_issues_flat) + len(job.get("static_issues") or [])
+
+    # 3. 同步 issue_count
+    await iii.trigger_async({
+        "function_id": "state::update",
+        "payload": {
+            "scope": "docx-audit-jobs", "key": job_id,
+            "ops": [{"type": "set", "path": "issue_count", "value": issue_count}],
+        },
+    })
+
+    # 4. 推送进度到浏览器
+    await _push_progress(iii, {
+        "job_id": job_id, "step": "agent_running",
+        "done_batches": done, "total_batches": total,
+        "total_paras": job.get("total_paras", 0),
+        "issue_count": issue_count,
+        "activity": {"type": "agent_call", "message": f"第 {batch_index+1}/{total} 批完成，发现 {len(issues)} 个语言问题", "at": int(_time.time()*1000)},
+    })
+
+    # 5. 全部完成 → 触发 finalize
+    finalized = False
+    if done >= total and total > 0:
+        await iii.trigger_async({
+            "function_id": "docx::quality_finalize",
+            "payload": {"job_id": job_id, "filename": filename},
+            "action": __import__("iii", fromlist=["TriggerAction"]).TriggerAction.Enqueue(queue="default"),
+        })
+        finalized = True
+
+    return {"job_id": job_id, "done": done, "total": total, "finalized": finalized}
 
 
 def _make_state_client():
@@ -886,6 +1016,11 @@ def main():
         return await fn_quality_batch(payload, iii=iii)
     iii.register_function("docx::quality_batch", quality_batch_with_iii)
 
+    # batch_complete：原子完成一次 batch（单次 RPC 替代多次独立操作）
+    async def batch_complete_with_iii(payload: dict) -> dict:
+        return await fn_batch_complete(payload, iii=iii)
+    iii.register_function("docx::batch_complete", batch_complete_with_iii)
+
     async def quality_finalize_with_iii(payload: dict) -> dict:
         return await fn_quality_finalize(payload, iii=iii)
     iii.register_function("docx::quality_finalize", quality_finalize_with_iii)
@@ -894,6 +1029,11 @@ def main():
     async def audit_status_with_iii(payload: dict) -> dict:
         return await fn_audit_status(payload, iii=iii)
     iii.register_function("docx::audit_status", audit_status_with_iii)
+
+    # job_reaper：补偿卡住的 job（由 engine cron 触发）
+    async def job_reaper_with_iii(payload: dict) -> dict:
+        return await fn_job_reaper(payload, iii=iii)
+    iii.register_function("docx::job_reaper", job_reaper_with_iii)
 
     # HTTP Trigger（若 SDK 支持；否则依赖引擎侧 iii-http + 配置）
     try:
