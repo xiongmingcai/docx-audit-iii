@@ -15,7 +15,7 @@ from pathlib import Path
 from opentelemetry import trace as otel_trace
 from opentelemetry.trace import SpanKind
 
-from .models import III_ENGINE_URL, LLM_API_KEY, issues_to_dicts, REPORTS_DIR
+from .models import III_ENGINE_URL, DEFAULT_PROJECT, issues_to_dicts, REPORTS_DIR
 from .parse import fn_parse
 from .static_checks import (
     fn_check_ai_traces,
@@ -420,6 +420,20 @@ async def fn_audit_start(payload: dict, iii=None) -> dict:
     check_comments = payload.get("check_comments", True)
     filename = payload.get("filename") or "audit"
 
+    # 从 iii-state 读取 LLM 配置并缓存（供 _get_llm_key 使用）
+    global _cached_llm_key
+    _cached_llm_key = ""
+    if iii is not None:
+        try:
+            state_cfg = await iii.trigger_async({
+                "function_id": "state::get",
+                "payload": {"scope": f"project:{DEFAULT_PROJECT}", "key": "settings"},
+            })
+            if state_cfg and isinstance(state_cfg, dict):
+                _cached_llm_key = str(state_cfg.get("llm", {}).get("apiKey", ""))
+        except Exception:
+            pass
+
     # 优先使用前端传入的 job_id，确保推送到达时前端 job 已存在
     pre_job_id = payload.get("job_id") or ""
 
@@ -636,8 +650,25 @@ async def fn_quality_batch(payload: dict, iii=None) -> dict:
         "llm_calls": {"batch_index": batch_index, "total_batches": _total_batches, "started_at": int(_time.time()*1000), "model": "DeepSeek-V3.2"},
     })
 
+    # ── 注入 LLM 配置到 agent_checks（从 iii-state 读取）──
+    from .agent_checks import check_paragraph_quality_agent, set_runtime_config
+    if local_iii is not None:
+        try:
+            state_cfg = await local_iii.trigger_async({
+                "function_id": "state::get",
+                "payload": {"scope": f"project:{DEFAULT_PROJECT}", "key": "settings"},
+            })
+            if state_cfg and isinstance(state_cfg, dict):
+                llm = state_cfg.get("llm", {})
+                set_runtime_config({
+                    "LLM_API_KEY": str(llm.get("apiKey", "")),
+                    "LLM_BASE_URL": str(llm.get("baseUrl", "https://api.siliconflow.cn/v1")),
+                    "LLM_MODEL": str(llm.get("model", "deepseek-ai/DeepSeek-V3.2")),
+                })
+        except Exception:
+            pass  # 注入失败不影响主流程（agent_checks 会回退到空配置）
+
     # ── Agent 质检（OTel span: audit.agent_quality）──
-    from .agent_checks import check_paragraph_quality_agent
     try:
         issues = await _with_span("audit.agent_quality",
             {"batch_index": batch_index, "total_batches": _total_batches, "para_count": len(elements)},
@@ -945,9 +976,12 @@ async def fn_audit_status(payload: dict, iii=None) -> dict:
     return job or {"error": "job not found"}
 
 
+_cached_llm_key: str = ""
+
+
 def _get_llm_key() -> str:
-    from .config_store import get as cfg_get
-    return str(cfg_get("LLM_API_KEY", "") or "")
+    """读取缓存的 LLM key（由 fn_audit_start 开头填充）。"""
+    return _cached_llm_key
 
 
 # ── OTel 可观测性辅助（对齐 @iii-dev/helpers/observability 标准）──────────
@@ -1045,11 +1079,14 @@ def main():
     iii.register_function("docx::check_paragraph_quality", fn_check_paragraph_quality)
     iii.register_function("docx::generate_report", fn_generate_report)
 
-    # 配置读写 Function（注入 iii 以实时读取 iii-state）
+    # 配置读写 Function（注入 iii 以读写 iii-state）
     async def config_get_with_iii(payload: dict) -> dict:
         return await fn_config_get(payload, iii=iii)
     iii.register_function("docx::config_get", config_get_with_iii)
-    iii.register_function("docx::config_set", fn_config_set)
+
+    async def config_set_with_iii(payload: dict) -> dict:
+        return await fn_config_set(payload, iii=iii)
+    iii.register_function("docx::config_set", config_set_with_iii)
 
     # 编排 Function：闭包注入 iii，使内部 trigger 可走引擎
     async def audit_with_iii(payload: dict) -> dict:

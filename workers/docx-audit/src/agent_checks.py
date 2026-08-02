@@ -4,7 +4,7 @@
   - agents SDK 在 import 时需要 OPENAI_API_KEY 非空（即使是占位），否则构建内部
     httpx client 时报 Missing credentials。
   - 因此模块加载早期（agents import 之前）就必须写入环境变量占位。
-  - LLM 配置通过 config_store 实时读取，前端写入 config.json 后即刻生效。
+  - LLM 配置从 iii-state 读取（通过注入的 iii 客户端），前端写入即刻生效。
 """
 from __future__ import annotations
 
@@ -14,8 +14,42 @@ import os
 import re
 from typing import Any
 
-from .config_store import get as cfg_get
-from .models import AuditIssue, get_priority, issues_to_dicts
+from .models import AuditIssue, DEFAULT_PROJECT, get_priority, issues_to_dicts
+
+
+# ── 运行时配置缓存（由调用方注入 iii 后填充）──────────────────────────
+
+_runtime_config: dict[str, str] = {}
+
+
+def set_runtime_config(cfg: dict[str, str]) -> None:
+    """设置运行时 LLM 配置（从 iii-state 读取后注入）。"""
+    global _runtime_config
+    _runtime_config = cfg
+
+
+def _cfg(key: str, default: str = "") -> str:
+    """读取运行时配置（由 set_runtime_config 填充）。"""
+    return _runtime_config.get(key, default)
+
+
+def _get_llm_key() -> str:
+    return _cfg("LLM_API_KEY")
+
+
+def _current_config_sig() -> str:
+    return f"{_cfg('LLM_BASE_URL')}|{_cfg('LLM_API_KEY')}|{_cfg('LLM_MODEL')}"
+
+
+def _ensure_openai_key_env():
+    """agents SDK 要求 OPENAI_API_KEY 非空；用真实 key 或占位填充。"""
+    key = _cfg("LLM_API_KEY")
+    if not os.environ.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = key if key else "sk-placeholder-local"
+
+
+# 模块加载时立即设置（早于任何 agents import）
+_ensure_openai_key_env()
 
 
 def _parse_elements(v):
@@ -27,32 +61,15 @@ def _parse_elements(v):
             return []
     return v or []
 
+
 _table_agent = None
 _quality_agent = None
 _agents_ready = False
 _last_config_sig = ""
 
 
-def _current_config_sig() -> str:
-    return f"{cfg_get('LLM_BASE_URL','')}|{cfg_get('LLM_API_KEY','')}|{cfg_get('LLM_MODEL','')}"
-
-
-def _get_llm_key() -> str:
-    return str(cfg_get("LLM_API_KEY", "") or "")
-
-
-def _ensure_openai_key_env():
-    """agents SDK 要求 OPENAI_API_KEY 非空；用真实 key 或占位填充。"""
-    key = cfg_get("LLM_API_KEY", "")
-    if not os.environ.get("OPENAI_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = key if key else "sk-placeholder-local"
-
-
-# 模块加载时立即设置（早于任何 agents import）
-_ensure_openai_key_env()
-
-
 def _init_agents():
+    """初始化 / 复用 Agent 实例（配置变更时重建）。"""
     global _table_agent, _quality_agent, _agents_ready, _last_config_sig
     sig = _current_config_sig()
     if _agents_ready and sig == _last_config_sig and _table_agent and _quality_agent:
@@ -70,9 +87,9 @@ def _init_agents():
     _ensure_openai_key_env()
     set_tracing_disabled(True)
 
-    llm_key = str(cfg_get("LLM_API_KEY", ""))
-    base_url = str(cfg_get("LLM_BASE_URL", "https://api.siliconflow.cn/v1"))
-    model = str(cfg_get("LLM_MODEL", "deepseek-ai/DeepSeek-V3.2"))
+    llm_key = _cfg("LLM_API_KEY")
+    base_url = _cfg("LLM_BASE_URL", "https://api.siliconflow.cn/v1")
+    model = _cfg("LLM_MODEL", "deepseek-ai/DeepSeek-V3.2")
 
     custom_client = AsyncOpenAI(
         base_url=base_url,
@@ -126,7 +143,6 @@ def _init_agents():
 async def _run_agent_async(agent, user_input: str) -> str | None:
     from agents import Runner, RunConfig
     from agents.models.multi_provider import MultiProvider
-
     try:
         run_config = RunConfig(
             model_provider=MultiProvider(unknown_prefix_mode="model_id"),
@@ -291,11 +307,5 @@ async def fn_check_table_refs_agent(payload: dict) -> dict:
 
 async def fn_check_paragraph_quality(payload: dict) -> dict:
     elements = _parse_elements(payload.get("elements"))
-    # CLI 传长 JSON 时可能为 string，需解析
-    if isinstance(elements, str):
-        try:
-            elements = json.loads(elements)
-        except Exception:
-            elements = []
     issues = await check_paragraph_quality_agent(elements)
     return {"issues": issues_to_dicts(issues), "count": len(issues)}
