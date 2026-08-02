@@ -8,6 +8,7 @@ import { JobDetail } from './pages/JobDetail';
 import { History } from './pages/History';
 import { Workers } from './pages/Workers';
 import { Settings } from './pages/Settings';
+import { MinerUConvert } from './pages/MinerUConvert';
 import { useStore, registerProgressHandler, startPolling, recoverJobsOnLoad } from './store';
 
 function Layout() {
@@ -42,6 +43,7 @@ function Layout() {
         <main className="min-w-0 flex-1 overflow-auto">
           <Routes>
             <Route path="/" element={<NewJob />} />
+            <Route path="/mineru" element={<MinerUConvert />} />
             <Route path="/jobs" element={<History />} />
             <Route path="/jobs/:id" element={<JobDetail />} />
             <Route path="/workers" element={<Workers />} />

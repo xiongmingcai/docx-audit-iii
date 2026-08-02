@@ -852,6 +852,176 @@ export function useStore<T>(selector?: (s: StoreState) => T) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════
+// MinerU 文档转换
+// ═══════════════════════════════════════════════════════════
+
+import type {
+  MineruConvertPayload,
+  MineruConvertResult,
+  MineruStatusResult,
+  MineruResultResult,
+  MineruUploadPayload,
+  MineruUploadResult,
+  MineruBatchStatusResult,
+} from './types';
+
+/** 提交 MinerU 转换任务（URL 模式） */
+export async function startMineruConvert(input: {
+  url: string;
+  model_version?: string;
+}): Promise<{ taskId: string; mineruTaskId: string }> {
+  const c = client ?? (await connect());
+
+  const result = await c.trigger<MineruConvertPayload, MineruConvertResult>({
+    function_id: 'mineru::convert',
+    payload: { url: input.url, model_version: input.model_version || 'pipeline' },
+  });
+
+  if (!result || !result.ok || !result.mineru_task_id) {
+    throw new Error(result?.error ?? '提交失败');
+  }
+
+  return { taskId: result.task_id || '', mineruTaskId: result.mineru_task_id };
+}
+
+/** 查询 MinerU 转换状态 */
+export async function getMineruStatus(
+  mineruTaskId: string,
+): Promise<MineruStatusResult> {
+  const c = client ?? (await connect());
+  return await c.trigger<{ mineru_task_id: string }, MineruStatusResult>({
+    function_id: 'mineru::status',
+    payload: { mineru_task_id: mineruTaskId },
+  });
+}
+
+/** 获取 MinerU 转换结果（支持 URL 模式和文件上传模式） */
+export async function getMineruResult(input: {
+  mineruTaskId?: string;
+  batchId?: string;
+}): Promise<MineruResultResult> {
+  const c = client ?? (await connect());
+  return await c.trigger<{
+    mineru_task_id?: string;
+    batch_id?: string;
+  }, MineruResultResult>({
+    function_id: 'mineru::result',
+    payload: {
+      mineru_task_id: input.mineruTaskId,
+      batch_id: input.batchId,
+    },
+  });
+}
+
+// ── 文件上传模式 ──────────────────────────────────────────
+
+/** 获取签名上传 URL（文件上传模式） */
+export async function getMineruUploadUrl(input: {
+  filename: string;
+  model_version?: string;
+}): Promise<{ batch_id: string; upload_url: string }> {
+  const c = client ?? (await connect());
+
+  const result = await c.trigger<MineruUploadPayload, MineruUploadResult>({
+    function_id: 'mineru::upload',
+    payload: { filename: input.filename, model_version: input.model_version || 'pipeline' },
+  });
+
+  if (!result || !result.ok || !result.batch_id || !result.upload_url) {
+    throw new Error(result?.error ?? '获取上传 URL 失败');
+  }
+
+  return { batch_id: result.batch_id, upload_url: result.upload_url };
+}
+
+/** 上传文件到 OSS（前端直接 PUT） */
+export async function uploadFileToOss(
+  uploadUrl: string,
+  file: File,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', uploadUrl);
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(e.loaded, e.total);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`上传失败: HTTP ${xhr.status}`));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('上传网络错误'));
+    xhr.send(file);
+  });
+}
+
+/** 查询批量任务状态（文件上传模式） */
+export async function getMineruBatchStatus(
+  batchId: string,
+): Promise<MineruBatchStatusResult> {
+  const c = client ?? (await connect());
+  return await c.trigger<{ batch_id: string }, MineruBatchStatusResult>({
+    function_id: 'mineru::batch_status',
+    payload: { batch_id: batchId },
+  });
+}
+
+// ── Channel 模式（流式传输，无大小限制）──────────────────
+
+/**
+ * 通过 Channel 上传文件到 MinerU。
+ *
+ * 流程:
+ *   1. 创建 Channel
+ *   2. 触发 mineru::channel_upload（Worker 从 Channel 读取文件字节）
+ *   3. 前端流式写入文件字节到 Channel
+ *   4. Worker 读取完成后自动上传到 MinerU OSS
+ *
+ * 优势: 文件内容不经过 JSON payload，无 16MB 限制
+ */
+export async function mineruChannelUpload(
+  file: File,
+  modelVersion: string = 'pipeline',
+  onProgress?: (sent: number, total: number) => void,
+): Promise<{ batchId: string }> {
+  const c = client ?? (await connect());
+
+  // 1. 创建 Channel
+  const channel = await c.createChannel();
+
+  // 2. 触发 Worker（Worker 从 Channel reader 读取文件字节）
+  const uploadPromise = c.trigger({
+    function_id: 'mineru::channel_upload',
+    payload: {
+      reader: channel.readerRef,
+      filename: file.name,
+      model_version: modelVersion,
+      language: 'ch',
+    },
+  });
+
+  // 3. 前端流式写入文件字节到 Channel writer
+  await writeFileToChannel(channel, file, onProgress);
+
+  // 4. 等待 Worker 完成上传
+  const result = await uploadPromise as { ok: boolean; batch_id?: string; error?: string };
+
+  if (!result.ok || !result.batch_id) {
+    throw new Error(result?.error ?? 'Channel 上传失败');
+  }
+
+  return { batchId: result.batch_id };
+}
+
 // 模块加载即尝试连接（浏览器环境）
 if (typeof window !== 'undefined') {
   void connect();

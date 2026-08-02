@@ -144,3 +144,92 @@ export interface LlmCallStatus {
   started_at: number; // epoch ms
   model: string;
 }
+
+// ═══════════════════════════════════════════════════════════
+// MinerU 文档转换
+// ═══════════════════════════════════════════════════════════
+
+export type MineruJobStatus = 'pending' | 'queued' | 'uploading' | 'processing' | 'done' | 'failed';
+
+export type MineruModelVersion = 'pipeline' | 'vlm' | 'MinerU-HTML';
+
+export type MineruSourceMode = 'url' | 'upload';
+
+export interface MineruJob {
+  id: string;                       // 前端生成的 task_id
+  mineruTaskId?: string;            // MinerU API 返回的任务 ID (URL 模式)
+  batchId?: string;                 // 批量任务 ID (上传模式)
+  fileName: string;                 // 文件名
+  source: MineruSourceMode;         // 输入方式
+  url: string;                      // 文件 URL
+  status: MineruJobStatus;
+  createdAt: number;
+  completedAt?: number;
+  markdown?: string;                // 转换结果
+  error?: string;                   // 错误信息
+  progress?: { extracted: number; total: number };
+  modelVersion: MineruModelVersion;
+}
+
+/** mineru::convert 的 payload */
+export interface MineruConvertPayload {
+  url: string;
+  model_version?: MineruModelVersion;
+  is_ocr?: boolean;
+  enable_formula?: boolean;
+  enable_table?: boolean;
+  language?: string;
+  page_ranges?: string;
+}
+
+/** mineru::convert 的返回值 */
+export interface MineruConvertResult {
+  ok: boolean;
+  error?: string;
+  task_id?: string;
+  mineru_task_id?: string;
+  state?: string;
+}
+
+/** mineru::status 的返回值 */
+export interface MineruStatusResult {
+  ok: boolean;
+  error?: string;
+  state?: string;
+  progress?: { extracted: number; total: number };
+}
+
+/** mineru::result 的返回值 */
+export interface MineruResultResult {
+  ok: boolean;
+  error?: string;
+  state?: string;
+  markdown?: string;
+}
+
+/** mineru::upload 的 payload */
+export interface MineruUploadPayload {
+  filename: string;
+  model_version?: MineruModelVersion;
+  language?: string;
+}
+
+/** mineru::upload 的返回值 */
+export interface MineruUploadResult {
+  ok: boolean;
+  error?: string;
+  batch_id?: string;
+  upload_url?: string;
+}
+
+/** mineru::batch_status 的返回值 */
+export interface MineruBatchStatusResult {
+  ok: boolean;
+  error?: string;
+  results?: Array<{
+    file_name: string;
+    state: string;
+    full_zip_url?: string;
+    err_msg?: string;
+  }>;
+}
